@@ -1,31 +1,49 @@
+// src/App.tsx（全体を置き換え）※前回版から修正：Layoutにsessionを渡すようにした
 import { useEffect, useState } from 'react'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import type { Session } from '@supabase/supabase-js'
 import { supabase } from './supabaseClient'
+import LoginPage from './components/LoginPage'
+import Layout from './components/Layout'
+import RecipeListPage from './pages/RecipeListPage'
+import RecipeDetailPage from './pages/RecipeDetailPage' // ← 既存の詳細画面。ファイル名が違えば合わせる
+import ShoppingPage from './pages/ShoppingPage'
+import MenuPage from './pages/MenuPage'
+import MasterPage from './pages/MasterPage'
+import SettingsPage from './pages/SettingsPage'
 
-function App() {
-  const [status, setStatus] = useState('確認中...')
+export default function App() {
+  const [session, setSession] = useState<Session | null>(null)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const checkConnection = async () => {
-      const { data, error } = await supabase.from('households').select('*')
-
-      if (error) {
-        setStatus('接続エラー: ' + error.message)
-        console.error('Supabase接続エラー:', error)
-      } else {
-        setStatus('接続成功!')
-        console.log('取得データ:', data)
-      }
-    }
-
-    checkConnection()
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session)
+      setLoading(false)
+    })
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s))
+    return () => sub.subscription.unsubscribe()
   }, [])
 
+  if (loading) return <div className="p-6 text-center text-gray-400">読み込み中…</div>
+  if (!session) return <LoginPage />
+
   return (
-    <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
-      <h1>かいめし君 接続テスト</h1>
-      <p>{status}</p>
-    </div>
+    <BrowserRouter>
+      <Routes>
+        {/* ★修正点：Layoutにsessionをpropsで渡す */}
+        <Route element={<Layout session={session} />}>
+          {/* ホームなし：起動したらいきなりレシピ */}
+          <Route path="/" element={<Navigate to="/recipes" replace />} />
+          <Route path="/recipes" element={<RecipeListPage />} />
+          <Route path="/recipes/:id" element={<RecipeDetailPage />} />
+          <Route path="/shopping" element={<ShoppingPage />} />
+          <Route path="/menu" element={<MenuPage />} />
+          <Route path="/master" element={<MasterPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="*" element={<Navigate to="/recipes" replace />} />
+        </Route>
+      </Routes>
+    </BrowserRouter>
   )
 }
-
-export default App
