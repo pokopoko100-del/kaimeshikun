@@ -107,6 +107,7 @@ export default function MasterPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [searchText, setSearchText] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<'すべて' | IngredientCategory>('すべて');
+  const [seasonOnly, setSeasonOnly] = useState(false); // 旬の食材のみ表示するフラグ
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('default');
   const [infoModalKey, setInfoModalKey] = useState<keyof IngredientMaster | null>(null);
@@ -139,6 +140,10 @@ export default function MasterPage() {
       const matchesCategory =
         selectedCategory === 'すべて' || item.category === selectedCategory;
       if (!matchesCategory) return false;
+
+      // 「旬のみ」がオンの時は、今が旬の食材だけに絞り込む
+      if (seasonOnly && !isInSeason(item.peak_season_months)) return false;
+
       if (!keyword) return true;
 
       const haystack = [item.ingredient_name, item.brand_name, item.usual_product_name]
@@ -159,7 +164,7 @@ export default function MasterPage() {
       });
     }
     return result;
-  }, [items, searchText, selectedCategory, sortKey]);
+  }, [items, searchText, selectedCategory, seasonOnly, sortKey]);
 
   const toggleExpand = (id: string) => {
     setExpandedId((prev) => (prev === id ? null : id));
@@ -181,7 +186,7 @@ export default function MasterPage() {
           className="w-full rounded-full border border-gray-300 px-4 py-2 text-sm focus:border-amber-500 focus:outline-none"
         />
 
-        {/* カテゴリ絞り込みチップ（ギャラリー） */}
+        {/* カテゴリ絞り込みチップ（ギャラリー）＋ 旬のみチップ */}
         <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
           {(['すべて', ...CATEGORIES] as const).map((cat) => (
             <button
@@ -196,6 +201,15 @@ export default function MasterPage() {
               {cat}
             </button>
           ))}
+          {/* 旬の食材のみ表示するトグルチップ */}
+          <button
+            onClick={() => setSeasonOnly((prev) => !prev)}
+            className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition ${
+              seasonOnly ? 'bg-pink-500 text-white' : 'bg-pink-50 text-pink-600'
+            }`}
+          >
+            🌸 旬のみ
+          </button>
         </div>
 
         {/* ギャラリーとプルダウンの間：選択中の栄養素の働き・不足症状を常時表示 */}
@@ -252,7 +266,7 @@ export default function MasterPage() {
           </div>
         ) : filteredItems.length === 0 ? (
           <div className="py-10 text-center text-sm text-gray-400">
-            該当する材料が見つかりませんでした
+            {seasonOnly ? '今が旬の材料は見つかりませんでした' : '該当する材料が見つかりませんでした'}
           </div>
         ) : (
           <div className="space-y-2">
