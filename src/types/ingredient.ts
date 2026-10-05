@@ -40,7 +40,13 @@ export interface IngredientMaster {
   iron_mg_per_100g: number | null;
   zinc_mg_per_100g: number | null;
   potassium_mg_per_100g: number | null;
+  vitamin_b6_mg_per_100g: number | null;   // ← 追加
+  vitamin_b12_ug_per_100g: number | null;  // ← 追加
+  folate_ug_per_100g: number | null;       // ← 追加
+  magnesium_mg_per_100g: number | null;    // ← 追加
   created_by: string | null;
+  peak_season_months: number[] | null;
   created_at: string;
   updated_at: string;
+  
 }

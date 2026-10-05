@@ -292,7 +292,7 @@ export default function Layout({ session }: { session: Session }) {
 .
 .
 ===== src\components\LoginPage.tsx =====
-
+.
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
 
@@ -405,7 +405,225 @@ export default function LoginPage() {
       </div>
     </div>
   )
-}.
+}
+
+===== src\data\nutrientInfo.ts =====
+
+
+import type { IngredientMaster } from '../types/ingredient';
+
+// ソート・常時表示欄・情報モーダルで共通して使う「栄養素」の定義
+// key: IngredientMasterの数値フィールド名 / label: 画面表示名（プルダウンにもそのまま使う）
+// effect / deficiency: 詳細説明（展開カード内のⓘモーダル用、文章）
+// effectTags / deficiencyTags: 短い単語を「、」区切りにした配列（常時表示欄の＋－用）
+export interface NutrientInfo {
+  key: keyof IngredientMaster;
+  label: string;
+  unit: string;
+  effect: string;
+  deficiency: string;
+  effectTags: string[];
+  deficiencyTags: string[];
+}
+
+export const NUTRIENT_INFO_LIST: NutrientInfo[] = [
+  {
+    key: 'calorie_per_100g',
+    label: 'カロリー',
+    unit: 'kcal',
+    effect: '体を動かすための熱量（エネルギー）のもと。体温維持や内臓の働き、運動のエネルギー源になる。',
+    deficiency: '不足するとエネルギー不足になり、疲れやすい・体重減少・集中力低下につながる。摂りすぎは体重増加のリスクを高める。',
+    effectTags: ['活動のエネルギー源', '体温維持'],
+    deficiencyTags: ['疲労', '体重減少', '集中力低下'],
+  },
+  {
+    key: 'protein_g_per_100g',
+    label: 'たんぱく質',
+    unit: 'g',
+    effect: '筋肉・皮膚・髪・臓器・ホルモン・免疫抗体など、体のあらゆる部分の材料になる栄養素。',
+    deficiency: '不足すると筋肉量の減少、免疫力の低下、肌や髪のトラブルにつながりやすい。',
+    effectTags: ['筋肉・皮膚・臓器の材料', '免疫維持'],
+    deficiencyTags: ['筋力低下', '免疫力低下', '肌・髪のトラブル'],
+  },
+  {
+    key: 'fat_g_per_100g',
+    label: '脂質',
+    unit: 'g',
+    effect: '細胞膜やホルモンの材料になるほか、効率のよいエネルギー源。脂溶性ビタミンの吸収も助ける。',
+    deficiency: '極端に不足すると肌の乾燥や抜け毛、ホルモンバランスの乱れにつながることがある。',
+    effectTags: ['細胞膜・ホルモンの材料', '脂溶性ビタミン吸収促進'],
+    deficiencyTags: ['肌の乾燥', '抜け毛', 'ホルモンバランスの乱れ'],
+  },
+  {
+    key: 'carbohydrate_g_per_100g',
+    label: '炭水化物',
+    unit: 'g',
+    effect: '糖質と食物繊維の総称。糖質は脳と体の主要なエネルギー源、食物繊維は腸内環境を整える。',
+    deficiency: '極端に減らすと疲労感・集中力低下・筋肉の分解につながることがある。',
+    effectTags: ['脳・体のエネルギー源', '腸内環境を整える'],
+    deficiencyTags: ['疲労感', '集中力低下', '筋肉の分解'],
+  },
+  {
+    key: 'sugar_g_per_100g',
+    label: '糖質',
+    unit: 'g',
+    effect: '体内でブドウ糖に分解され、脳や筋肉の即効性のあるエネルギー源になる。',
+    deficiency: '極端に制限すると集中力の低下やイライラ、疲労感につながりやすい。',
+    effectTags: ['脳の即効エネルギー源', '筋肉のエネルギー源'],
+    deficiencyTags: ['集中力低下', 'イライラ', '疲労感'],
+  },
+  {
+    key: 'dietary_fiber_g_per_100g',
+    label: '食物繊維',
+    unit: 'g',
+    effect: '消化されずに腸まで届き、腸内環境を整える。便通改善、血糖値の上昇抑制、コレステロール排出を助ける。',
+    deficiency: '不足すると便秘になりやすく、生活習慣病のリスクが上がるとされる。',
+    effectTags: ['腸内環境を整える', '血糖値上昇を抑える', 'コレステロール排出'],
+    deficiencyTags: ['便秘', '生活習慣病リスク上昇'],
+  },
+  {
+    key: 'salt_g_per_100g',
+    label: '食塩相当量',
+    unit: 'g',
+    effect: '体内の水分バランスや血圧の調整、神経伝達に関わる（主にナトリウムの働き）。',
+    deficiency: '通常の食生活で不足することは稀。摂りすぎによる高血圧・むくみが主な注意点。',
+    effectTags: ['水分バランス調整', '神経伝達'],
+    deficiencyTags: ['通常は不足しにくい', '摂りすぎは高血圧・むくみ'],
+  },
+  {
+    key: 'vitamin_a_ug_per_100g',
+    label: 'ビタミンA',
+    unit: 'µg',
+    effect: '目の健康（暗い場所での見え方）を保ち、皮膚や粘膜を正常に保つ。免疫力にも関わる。',
+    deficiency: '不足すると暗い場所で見えにくくなる「夜盲症」や、皮膚・粘膜の乾燥につながることがある。',
+    effectTags: ['視力維持', '皮膚・粘膜の健康', '免疫維持'],
+    deficiencyTags: ['夜盲症', '皮膚・粘膜の乾燥', '感染症にかかりやすい'],
+  },
+  {
+    key: 'vitamin_b1_mg_per_100g',
+    label: 'ビタミンB1',
+    unit: 'mg',
+    effect: '糖質をエネルギーに変える代謝を助ける。ご飯や糖質中心の食事で消費されやすい。',
+    deficiency: '不足すると疲れやすくなったり、食欲不振、むくみ・しびれ（脚気）につながることがある。',
+    effectTags: ['糖質代謝を助ける'],
+    deficiencyTags: ['疲労', '食欲不振', 'むくみ・しびれ'],
+  },
+  {
+    key: 'vitamin_b2_mg_per_100g',
+    label: 'ビタミンB2',
+    unit: 'mg',
+    effect: '糖質・脂質・たんぱく質のエネルギー代謝を助け、皮膚や粘膜の健康維持にも関わる。',
+    deficiency: '不足すると口内炎・口角炎・舌炎ができやすくなったり、肌荒れ・目の充血が起こることがある。',
+    effectTags: ['三大栄養素の代謝を助ける', '皮膚・粘膜の健康'],
+    deficiencyTags: ['口内炎・口角炎', '肌荒れ', '目の充血'],
+  },
+  {
+    key: 'vitamin_c_mg_per_100g',
+    label: 'ビタミンC',
+    unit: 'mg',
+    effect: 'コラーゲンの合成を助け、肌や血管の健康を保つ。抗酸化作用や、鉄の吸収を助ける働きもある。',
+    deficiency: '不足すると歯茎から出血しやすくなったり、あざができやすくなる（毛細血管がもろくなる）ことがある。',
+    effectTags: ['コラーゲン生成', '抗酸化作用', '鉄の吸収促進'],
+    deficiencyTags: ['疲労', '筋力低下', '皮膚・粘膜の不調', '歯茎出血', 'あざ'],
+  },
+  {
+    key: 'vitamin_d_ug_per_100g',
+    label: 'ビタミンD',
+    unit: 'µg',
+    effect: 'カルシウムの吸収を助け、骨や歯を丈夫に保つ。日光に当たることで皮膚でも作られる。',
+    deficiency: '不足すると骨が弱くなりやすく、骨密度の低下や骨粗しょう症のリスクにつながることがある。',
+    effectTags: ['カルシウム吸収促進', '骨・歯を丈夫にする'],
+    deficiencyTags: ['骨密度低下', '骨粗しょう症リスク'],
+  },
+  {
+    key: 'vitamin_e_mg_per_100g',
+    label: 'ビタミンE',
+    unit: 'mg',
+    effect: '抗酸化作用があり、細胞膜を酸化から守る。血行を保つ働きもあるとされる。',
+    deficiency: '通常の食生活で不足することは少ないが、不足すると神経や筋肉の働きに影響が出ることがある。',
+    effectTags: ['抗酸化作用', '血行維持'],
+    deficiencyTags: ['通常は不足しにくい', '神経・筋肉の不調'],
+  },
+  {
+    key: 'calcium_mg_per_100g',
+    label: 'カルシウム',
+    unit: 'mg',
+    effect: '骨や歯の材料になるほか、筋肉の収縮や神経の伝達にも関わる。体内に最も多いミネラル。',
+    deficiency: '不足が続くと骨からカルシウムが溶け出し、骨密度の低下や骨粗しょう症につながりやすい。',
+    effectTags: ['骨・歯の材料', '筋肉の収縮', '神経伝達'],
+    deficiencyTags: ['骨密度低下', '骨粗しょう症リスク'],
+  },
+  {
+    key: 'iron_mg_per_100g',
+    label: '鉄',
+    unit: 'mg',
+    effect: '赤血球（ヘモグロビン）の材料として、全身に酸素を運ぶ役割を持つ。',
+    deficiency: '不足すると酸素が運ばれにくくなり、疲れやすさ・立ちくらみ・冷えなど鉄欠乏性貧血の症状につながりやすい。',
+    effectTags: ['赤血球の材料', '酸素運搬'],
+    deficiencyTags: ['貧血', '疲れやすさ', '立ちくらみ', '冷え'],
+  },
+  {
+    key: 'zinc_mg_per_100g',
+    label: '亜鉛',
+    unit: 'mg',
+    effect: '味覚を正常に保つほか、皮膚・粘膜の健康維持、免疫機能、多くの酵素の構成成分として働く。',
+    deficiency: '不足すると味を感じにくくなったり、肌荒れ、感染症にかかりやすくなることがある。',
+    effectTags: ['味覚維持', '皮膚・粘膜の健康', '免疫維持'],
+    deficiencyTags: ['味覚障害', '肌荒れ', '感染症にかかりやすい'],
+  },
+  {
+    key: 'potassium_mg_per_100g',
+    label: 'カリウム',
+    unit: 'mg',
+    effect: '細胞内の水分バランスを調整し、ナトリウムとのバランスで血圧を正常に保つ働きがある。',
+    deficiency: '不足するとむくみや血圧の上昇、脱力感につながることがある。',
+    effectTags: ['水分バランス調整', '血圧を正常に保つ'],
+    deficiencyTags: ['むくみ', '血圧上昇', '脱力感'],
+  },
+  {
+    key: 'vitamin_b6_mg_per_100g',
+    label: 'ビタミンB6',
+    unit: 'mg',
+    effect: 'たんぱく質の分解・合成を助ける。皮膚や粘膜の健康維持、神経伝達物質の合成にも関わる。',
+    deficiency: '不足すると肌荒れや口内炎、貧血、神経の不調（イライラ・集中力低下）につながることがある。',
+    effectTags: ['たんぱく質代謝を助ける', '皮膚・粘膜の健康'],
+    deficiencyTags: ['肌荒れ', '口内炎', '貧血', 'イライラ'],
+  },
+  {
+    key: 'vitamin_b12_ug_per_100g',
+    label: 'ビタミンB12',
+    unit: 'µg',
+    effect: '赤血球の生成を助け、神経の働きを正常に保つ。葉酸と協力して働く。',
+    deficiency: '不足すると貧血（悪性貧血）や手足のしびれ、記憶力の低下につながることがある。植物性食品にはほぼ含まれない。',
+    effectTags: ['赤血球の生成', '神経機能の維持'],
+    deficiencyTags: ['貧血', '手足のしびれ', '記憶力低下'],
+  },
+  {
+    key: 'folate_ug_per_100g',
+    label: '葉酸',
+    unit: 'µg',
+    effect: '赤血球の生成やDNAの合成を助ける。細胞分裂が盛んな妊娠期には特に重要とされる。',
+    deficiency: '不足すると貧血（巨赤芽球性貧血）につながることがある。妊娠を考える時期は不足に注意。',
+    effectTags: ['赤血球の生成', 'DNA合成'],
+    deficiencyTags: ['貧血', '妊娠期は特に注意'],
+  },
+  {
+    key: 'magnesium_mg_per_100g',
+    label: 'マグネシウム',
+    unit: 'mg',
+    effect: '骨の形成を助けるほか、筋肉の収縮・弛緩、神経の興奮を調整する多くの酵素の働きに関わる。',
+    deficiency: '不足すると筋肉のけいれん（こむら返り）、疲労感、不整脈につながることがある。',
+    effectTags: ['骨の形成', '筋肉の収縮・弛緩', '神経の調整'],
+    deficiencyTags: ['こむら返り', '疲労感', '不整脈'],
+  },
+];
+
+// key から NutrientInfo を引くヘルパー
+export function getNutrientInfo(key: keyof IngredientMaster) {
+  return NUTRIENT_INFO_LIST.find((n) => n.key === key) ?? null;
+}
+
+
 
 ===== src\lib\supabaseStorage.ts =====
 
@@ -466,9 +684,11 @@ export function useRecipeImage(imagePath: string | null) {
 
 ===== src\pages\MasterPage.tsx =====
 
+
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../supabaseClient';
 import type { IngredientCategory, IngredientMaster } from '../types/ingredient';
+import { NUTRIENT_INFO_LIST, getNutrientInfo } from '../data/nutrientInfo';
 
 const CATEGORIES: IngredientCategory[] = [
   '野菜',
@@ -492,6 +712,14 @@ const CATEGORY_COLOR: Record<IngredientCategory, string> = {
   日用品: 'bg-purple-100 text-purple-700',
 };
 
+// ソートの選択肢。先頭は「並び替えなし（カテゴリ順）」
+// プルダウンの表示文字列は栄養素名そのまま（「○○が多い順」のような接尾語は付けない）
+type SortKey = 'default' | keyof IngredientMaster;
+const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: 'default', label: 'カテゴリ順（既定）' },
+  ...NUTRIENT_INFO_LIST.map((n) => ({ key: n.key as SortKey, label: n.label })),
+];
+
 // 数値を「値がある時だけ」表示するための小さなヘルパー
 function fmt(value: number | null, unit: string) {
   if (value === null || value === undefined) return '―';
@@ -505,6 +733,8 @@ export default function MasterPage() {
   const [searchText, setSearchText] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<'すべて' | IngredientCategory>('すべて');
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [sortKey, setSortKey] = useState<SortKey>('default');
+  const [infoModalKey, setInfoModalKey] = useState<keyof IngredientMaster | null>(null);
 
   useEffect(() => {
     const fetchIngredients = async () => {
@@ -530,7 +760,7 @@ export default function MasterPage() {
 
   const filteredItems = useMemo(() => {
     const keyword = searchText.trim().toLowerCase();
-    return items.filter((item) => {
+    const result = items.filter((item) => {
       const matchesCategory =
         selectedCategory === 'すべて' || item.category === selectedCategory;
       if (!matchesCategory) return false;
@@ -542,11 +772,27 @@ export default function MasterPage() {
         .toLowerCase();
       return haystack.includes(keyword);
     });
-  }, [items, searchText, selectedCategory]);
+
+    if (sortKey !== 'default') {
+      return [...result].sort((a, b) => {
+        const va = a[sortKey] as number | null;
+        const vb = b[sortKey] as number | null;
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1;
+        if (vb == null) return -1;
+        return vb - va;
+      });
+    }
+    return result;
+  }, [items, searchText, selectedCategory, sortKey]);
 
   const toggleExpand = (id: string) => {
     setExpandedId((prev) => (prev === id ? null : id));
   };
+
+  const infoNutrient = infoModalKey ? getNutrientInfo(infoModalKey) : null;
+  // 現在プルダウンで選んでいる栄養素（カテゴリ順の時はnull）
+  const selectedSortNutrient = sortKey !== 'default' ? getNutrientInfo(sortKey as keyof IngredientMaster) : null;
 
   return (
     <div className="min-h-screen bg-gray-50 pb-20">
@@ -560,7 +806,7 @@ export default function MasterPage() {
           className="w-full rounded-full border border-gray-300 px-4 py-2 text-sm focus:border-amber-500 focus:outline-none"
         />
 
-        {/* カテゴリ絞り込みチップ */}
+        {/* カテゴリ絞り込みチップ（ギャラリー） */}
         <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
           {(['すべて', ...CATEGORIES] as const).map((cat) => (
             <button
@@ -575,6 +821,37 @@ export default function MasterPage() {
               {cat}
             </button>
           ))}
+        </div>
+
+        {/* ギャラリーとプルダウンの間：選択中の栄養素の働き・不足症状を常時表示 */}
+        {selectedSortNutrient && (
+          <div className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-gray-700">
+            <p className="font-semibold text-amber-700">多い順：{selectedSortNutrient.label}</p>
+            <p className="mt-0.5">
+              <span className="font-bold text-green-600">　＋　</span>
+              {selectedSortNutrient.effectTags.join('、')}
+            </p>
+            <p>
+              <span className="font-bold text-red-500">　－　</span>
+              {selectedSortNutrient.deficiencyTags.join('、')}
+            </p>
+          </div>
+        )}
+
+        {/* 並び替えプルダウン */}
+        <div className="mt-2 flex items-center gap-2">
+          <span className="text-xs text-gray-400">多い順：</span>
+          <select
+            value={sortKey}
+            onChange={(e) => setSortKey(e.target.value as SortKey)}
+            className="flex-1 rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-xs text-gray-700 focus:border-amber-500 focus:outline-none"
+          >
+            {SORT_OPTIONS.map((opt) => (
+              <option key={opt.key} value={opt.key}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -593,7 +870,6 @@ export default function MasterPage() {
       {/* 一覧 */}
       <div className="px-4 pt-2">
         {loading ? (
-          // 読み込み中の仮カード
           <div className="space-y-2">
             {Array.from({ length: 6 }).map((_, i) => (
               <div key={i} className="h-16 animate-pulse rounded-xl bg-gray-200" />
@@ -607,11 +883,10 @@ export default function MasterPage() {
           <div className="space-y-2">
             {filteredItems.map((item) => {
               const isExpanded = expandedId === item.id;
+              const sortedValue = sortKey !== 'default' ? (item[sortKey] as number | null) : null;
+
               return (
-                <div
-                  key={item.id}
-                  className="rounded-xl bg-white shadow-sm"
-                >
+                <div key={item.id} className="rounded-xl bg-white shadow-sm">
                   <button
                     onClick={() => toggleExpand(item.id)}
                     className="flex w-full items-center justify-between px-4 py-3 text-left"
@@ -634,7 +909,13 @@ export default function MasterPage() {
                       )}
                     </div>
                     <div className="ml-3 shrink-0 text-right text-xs text-gray-500">
-                      <div>{fmt(item.calorie_per_100g, 'kcal')} / 100g</div>
+                      {selectedSortNutrient ? (
+                        <div className="font-semibold text-amber-600">
+                          {selectedSortNutrient.label} {fmt(sortedValue, selectedSortNutrient.unit)}
+                        </div>
+                      ) : (
+                        <div>{fmt(item.calorie_per_100g, 'kcal')} / 100g</div>
+                      )}
                       <div>¥{fmt(item.price_per_100g, '')} / 100g</div>
                     </div>
                   </button>
@@ -644,9 +925,7 @@ export default function MasterPage() {
                     <div className="border-t border-gray-100 px-4 py-3 text-sm">
                       <div className="mb-2 grid grid-cols-2 gap-x-4 gap-y-1 text-gray-600">
                         <div>既定の単位：{item.default_unit ?? '―'}</div>
-                        <div>
-                          1単位の重さ：{fmt(item.unit_weight_g, 'g')}
-                        </div>
+                        <div>1単位の重さ：{fmt(item.unit_weight_g, 'g')}</div>
                         <div>いつもの商品：{item.usual_product_name ?? '―'}</div>
                         <div>購入店：{item.store_name ?? '―'}</div>
                       </div>
@@ -655,33 +934,33 @@ export default function MasterPage() {
                         <div className="mb-1 text-xs font-semibold text-gray-500">
                           栄養価（100gあたり）
                         </div>
-                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-gray-700">
-                          <div>カロリー：{fmt(item.calorie_per_100g, 'kcal')}</div>
-                          <div>たんぱく質：{fmt(item.protein_g_per_100g, 'g')}</div>
-                          <div>脂質：{fmt(item.fat_g_per_100g, 'g')}</div>
-                          <div>炭水化物：{fmt(item.carbohydrate_g_per_100g, 'g')}</div>
-                          <div>　糖質：{fmt(item.sugar_g_per_100g, 'g')}</div>
-                          <div>　食物繊維：{fmt(item.dietary_fiber_g_per_100g, 'g')}</div>
-                          <div>食塩相当量：{fmt(item.salt_g_per_100g, 'g')}</div>
-                        </div>
+                        <NutrientRow label="カロリー" value={fmt(item.calorie_per_100g, 'kcal')} onInfo={() => setInfoModalKey('calorie_per_100g')} />
+                        <NutrientRow label="たんぱく質" value={fmt(item.protein_g_per_100g, 'g')} onInfo={() => setInfoModalKey('protein_g_per_100g')} />
+                        <NutrientRow label="脂質" value={fmt(item.fat_g_per_100g, 'g')} onInfo={() => setInfoModalKey('fat_g_per_100g')} />
+                        <NutrientRow label="炭水化物" value={fmt(item.carbohydrate_g_per_100g, 'g')} onInfo={() => setInfoModalKey('carbohydrate_g_per_100g')} />
+                        <NutrientRow label="　糖質" value={fmt(item.sugar_g_per_100g, 'g')} onInfo={() => setInfoModalKey('sugar_g_per_100g')} />
+                        <NutrientRow label="　食物繊維" value={fmt(item.dietary_fiber_g_per_100g, 'g')} onInfo={() => setInfoModalKey('dietary_fiber_g_per_100g')} />
+                        <NutrientRow label="食塩相当量" value={fmt(item.salt_g_per_100g, 'g')} onInfo={() => setInfoModalKey('salt_g_per_100g')} />
                       </div>
 
                       <div className="mt-2 border-t border-gray-100 pt-2">
                         <div className="mb-1 text-xs font-semibold text-gray-500">
                           ビタミン・ミネラル（100gあたり）
                         </div>
-                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-gray-700">
-                          <div>ビタミンA：{fmt(item.vitamin_a_ug_per_100g, 'µg')}</div>
-                          <div>ビタミンB1：{fmt(item.vitamin_b1_mg_per_100g, 'mg')}</div>
-                          <div>ビタミンB2：{fmt(item.vitamin_b2_mg_per_100g, 'mg')}</div>
-                          <div>ビタミンC：{fmt(item.vitamin_c_mg_per_100g, 'mg')}</div>
-                          <div>ビタミンD：{fmt(item.vitamin_d_ug_per_100g, 'µg')}</div>
-                          <div>ビタミンE：{fmt(item.vitamin_e_mg_per_100g, 'mg')}</div>
-                          <div>カルシウム：{fmt(item.calcium_mg_per_100g, 'mg')}</div>
-                          <div>鉄：{fmt(item.iron_mg_per_100g, 'mg')}</div>
-                          <div>亜鉛：{fmt(item.zinc_mg_per_100g, 'mg')}</div>
-                          <div>カリウム：{fmt(item.potassium_mg_per_100g, 'mg')}</div>
-                        </div>
+                        <NutrientRow label="ビタミンA" value={fmt(item.vitamin_a_ug_per_100g, 'µg')} onInfo={() => setInfoModalKey('vitamin_a_ug_per_100g')} />
+                        <NutrientRow label="ビタミンB1" value={fmt(item.vitamin_b1_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_b1_mg_per_100g')} />
+                        <NutrientRow label="ビタミンB2" value={fmt(item.vitamin_b2_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_b2_mg_per_100g')} />
+                        <NutrientRow label="ビタミンB6" value={fmt(item.vitamin_b6_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_b6_mg_per_100g')} />
+                        <NutrientRow label="ビタミンB12" value={fmt(item.vitamin_b12_ug_per_100g, 'µg')} onInfo={() => setInfoModalKey('vitamin_b12_ug_per_100g')} />
+                        <NutrientRow label="葉酸" value={fmt(item.folate_ug_per_100g, 'µg')} onInfo={() => setInfoModalKey('folate_ug_per_100g')} />
+                        <NutrientRow label="ビタミンC" value={fmt(item.vitamin_c_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_c_mg_per_100g')} />
+                        <NutrientRow label="ビタミンD" value={fmt(item.vitamin_d_ug_per_100g, 'µg')} onInfo={() => setInfoModalKey('vitamin_d_ug_per_100g')} />
+                        <NutrientRow label="ビタミンE" value={fmt(item.vitamin_e_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_e_mg_per_100g')} />
+                        <NutrientRow label="カルシウム" value={fmt(item.calcium_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('calcium_mg_per_100g')} />
+                        <NutrientRow label="鉄" value={fmt(item.iron_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('iron_mg_per_100g')} />
+                        <NutrientRow label="亜鉛" value={fmt(item.zinc_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('zinc_mg_per_100g')} />
+                        <NutrientRow label="カリウム" value={fmt(item.potassium_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('potassium_mg_per_100g')} />
+                        <NutrientRow label="マグネシウム" value={fmt(item.magnesium_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('magnesium_mg_per_100g')} />
                       </div>
 
                       <div className="mt-2 border-t border-gray-100 pt-2 text-xs text-gray-400">
@@ -712,6 +991,63 @@ export default function MasterPage() {
           </div>
         )}
       </div>
+
+      {/* 栄養素の詳しい効果・不足症状を表示するモーダル（ⓘタップ時） */}
+      {infoNutrient && (
+        <div
+          className="fixed inset-0 z-50 flex items-end bg-black/40 sm:items-center sm:justify-center"
+          onClick={() => setInfoModalKey(null)}
+        >
+          <div
+            className="w-full rounded-t-2xl bg-white p-5 sm:max-w-sm sm:rounded-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-base font-bold text-gray-900">{infoNutrient.label}</h3>
+              <button
+                onClick={() => setInfoModalKey(null)}
+                className="rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-500"
+              >
+                閉じる
+              </button>
+            </div>
+            <div className="mb-3">
+              <div className="mb-1 text-xs font-semibold text-amber-600">どんな効果があるか</div>
+              <p className="text-sm leading-relaxed text-gray-700">{infoNutrient.effect}</p>
+            </div>
+            <div>
+              <div className="mb-1 text-xs font-semibold text-red-500">不足するとどうなるか</div>
+              <p className="text-sm leading-relaxed text-gray-700">{infoNutrient.deficiency}</p>
+            </div>
+            <p className="mt-4 text-[10px] leading-relaxed text-gray-400">
+              ※一般的な栄養知識の紹介であり、医療的な診断やアドバイスではありません。体調が気になる場合は医師・管理栄養士にご相談ください。
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 栄養価の1行表示（値 ＋ ⓘ情報ボタン）
+function NutrientRow({
+  label,
+  value,
+  onInfo,
+}: {
+  label: string;
+  value: string;
+  onInfo: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between py-0.5 text-gray-700">
+      <button onClick={onInfo} className="flex items-center gap-1 text-left">
+        <span>{label}</span>
+        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-gray-200 text-[10px] text-gray-500">
+          i
+        </span>
+      </button>
+      <span>{value}</span>
     </div>
   );
 }
@@ -1238,9 +1574,15 @@ export interface IngredientMaster {
   iron_mg_per_100g: number | null;
   zinc_mg_per_100g: number | null;
   potassium_mg_per_100g: number | null;
+  vitamin_b6_mg_per_100g: number | null;   // ← 追加
+  vitamin_b12_ug_per_100g: number | null;  // ← 追加
+  folate_ug_per_100g: number | null;       // ← 追加
+  magnesium_mg_per_100g: number | null;    // ← 追加
   created_by: string | null;
+  peak_season_months: number[] | null;
   created_at: string;
   updated_at: string;
+  
 }
 
 ===== src\types\recipe.ts =====

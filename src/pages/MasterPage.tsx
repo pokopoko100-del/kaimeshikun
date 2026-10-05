@@ -26,19 +26,79 @@ const CATEGORY_COLOR: Record<IngredientCategory, string> = {
 };
 
 // ソートの選択肢。先頭は「並び替えなし（カテゴリ順）」
+// プルダウンの表示文字列は栄養素名そのまま（「○○が多い順」のような接尾語は付けない）
 type SortKey = 'default' | keyof IngredientMaster;
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: 'default', label: 'カテゴリ順（既定）' },
-  ...NUTRIENT_INFO_LIST.map((n) => ({
-    key: n.key as SortKey,
-    label: `${n.label}が多い順`,
-  })),
+  ...NUTRIENT_INFO_LIST.map((n) => ({ key: n.key as SortKey, label: n.label })),
 ];
 
 // 数値を「値がある時だけ」表示するための小さなヘルパー
 function fmt(value: number | null, unit: string) {
   if (value === null || value === undefined) return '―';
   return `${value}${unit}`;
+}
+
+// 現在の月(1〜12)が、その食材の旬の月に含まれているかを判定
+function isInSeason(months: number[] | null, now: Date = new Date()): boolean {
+  if (!months || months.length === 0) return false;
+  const currentMonth = now.getMonth() + 1; // JSのgetMonth()は0始まりなので+1
+  return months.includes(currentMonth);
+}
+
+// 旬の月の配列を「11月〜2月」のような表示用文字列に変換（年またぎにも対応）
+function formatSeasonMonths(months: number[] | null): string {
+  if (!months || months.length === 0) return '';
+  const sorted = [...months].sort((a, b) => a - b);
+
+  // 年またぎ（12→1のつながり）を考慮して、12月始まりに回転させる
+  const rotated: number[] = [...sorted];
+  while (rotated.length > 1 && rotated[rotated.length - 1] === 12 && rotated[0] === 1) {
+    rotated.unshift(rotated.pop()!);
+    if (rotated[0] !== 12) break;
+  }
+
+  const ranges: string[] = [];
+  let start = rotated[0];
+  let prev = rotated[0];
+  for (let i = 1; i <= rotated.length; i++) {
+    const cur = rotated[i];
+    const isConsecutive = cur !== undefined && (cur === prev + 1 || (prev === 12 && cur === 1));
+    if (!isConsecutive) {
+      ranges.push(start === prev ? `${start}月` : `${start}月〜${prev}月`);
+      start = cur;
+    }
+    prev = cur;
+  }
+  return ranges.join('・');
+}
+
+// 「大さじ」「小さじ」は単位が先頭に来る言い方、それ以外は数字が先頭に来る言い方にする
+function formatUnitLabel(defaultUnit: string | null): string {
+  if (!defaultUnit) return '';
+  if (defaultUnit === '大さじ' || defaultUnit === '小さじ') return `${defaultUnit}1`;
+  return `1${defaultUnit}`;
+}
+
+// 小さい数値は小数点を残し、大きい数値は整数に丸める（表示を見やすくするため）
+function roundSmart(value: number): number {
+  const abs = Math.abs(value);
+  if (abs === 0) return 0;
+  if (abs >= 10) return Math.round(value);
+  if (abs >= 1) return Math.round(value * 10) / 10;
+  return Math.round(value * 100) / 100;
+}
+
+// 100gあたりの値 → 1単位(大さじ1・1個など)あたりの値に換算
+function perUnitValue(value: number | null, unitWeightG: number | null): number | null {
+  if (value == null || unitWeightG == null) return null;
+  return (value * unitWeightG) / 100;
+}
+
+function fmtPerUnit(value: number | null, unitWeightG: number | null, unit: string): string | null {
+  const per = perUnitValue(value, unitWeightG);
+  if (per == null) return null;
+  return `${roundSmart(per)}${unit}`;
 }
 
 export default function MasterPage() {
@@ -88,7 +148,6 @@ export default function MasterPage() {
       return haystack.includes(keyword);
     });
 
-    // 栄養素ソートが選ばれている場合は、その値が多い順（null・未入力は末尾）に並べ替える
     if (sortKey !== 'default') {
       return [...result].sort((a, b) => {
         const va = a[sortKey] as number | null;
@@ -107,6 +166,8 @@ export default function MasterPage() {
   };
 
   const infoNutrient = infoModalKey ? getNutrientInfo(infoModalKey) : null;
+  // 現在プルダウンで選んでいる栄養素（カテゴリ順の時はnull）
+  const selectedSortNutrient = sortKey !== 'default' ? getNutrientInfo(sortKey as keyof IngredientMaster) : null;
 
   return (
     <div className="min-h-screen bg-gray-50 pb-20">
@@ -120,7 +181,7 @@ export default function MasterPage() {
           className="w-full rounded-full border border-gray-300 px-4 py-2 text-sm focus:border-amber-500 focus:outline-none"
         />
 
-        {/* カテゴリ絞り込みチップ */}
+        {/* カテゴリ絞り込みチップ（ギャラリー） */}
         <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
           {(['すべて', ...CATEGORIES] as const).map((cat) => (
             <button
@@ -137,9 +198,24 @@ export default function MasterPage() {
           ))}
         </div>
 
-        {/* 並び替えセレクト */}
+        {/* ギャラリーとプルダウンの間：選択中の栄養素の働き・不足症状を常時表示 */}
+        {selectedSortNutrient && (
+          <div className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-gray-700">
+            <p className="font-semibold text-amber-700">多い順：{selectedSortNutrient.label}</p>
+            <p className="mt-0.5">
+              <span className="font-bold text-green-600">　＋　</span>
+              {selectedSortNutrient.effectTags.join('、')}
+            </p>
+            <p>
+              <span className="font-bold text-red-500">　－　</span>
+              {selectedSortNutrient.deficiencyTags.join('、')}
+            </p>
+          </div>
+        )}
+
+        {/* 並び替えプルダウン */}
         <div className="mt-2 flex items-center gap-2">
-          <span className="text-xs text-gray-400">並び替え：</span>
+          <span className="text-xs text-gray-400">多い順：</span>
           <select
             value={sortKey}
             onChange={(e) => setSortKey(e.target.value as SortKey)}
@@ -182,10 +258,13 @@ export default function MasterPage() {
           <div className="space-y-2">
             {filteredItems.map((item) => {
               const isExpanded = expandedId === item.id;
-              // 並び替え中は、選ばれている栄養素の値をカードの右上にも出す（並び順の根拠が分かるように）
-              const sortedValue =
-                sortKey !== 'default' ? (item[sortKey] as number | null) : null;
-              const sortedInfo = sortKey !== 'default' ? getNutrientInfo(sortKey as keyof IngredientMaster) : null;
+              const sortedValue = sortKey !== 'default' ? (item[sortKey] as number | null) : null;
+
+              // この材料の「1単位あたり」換算に使う共通情報
+              const unitLabel = formatUnitLabel(item.default_unit);
+              const showUnit = item.unit_weight_g != null && unitLabel !== '';
+              const pu = (value: number | null, unit: string) =>
+                showUnit ? fmtPerUnit(value, item.unit_weight_g, unit) : null;
 
               return (
                 <div key={item.id} className="rounded-xl bg-white shadow-sm">
@@ -203,6 +282,11 @@ export default function MasterPage() {
                         <span className="truncate font-medium text-gray-800">
                           {item.ingredient_name}
                         </span>
+                        {isInSeason(item.peak_season_months) && (
+                          <span className="shrink-0 rounded bg-pink-100 px-1.5 py-0.5 text-[10px] font-bold text-pink-600">
+                            旬
+                          </span>
+                        )}
                       </div>
                       {item.brand_name && (
                         <div className="mt-0.5 truncate text-xs text-gray-400">
@@ -211,14 +295,35 @@ export default function MasterPage() {
                       )}
                     </div>
                     <div className="ml-3 shrink-0 text-right text-xs text-gray-500">
-                      {sortedInfo ? (
+                      {selectedSortNutrient ? (
                         <div className="font-semibold text-amber-600">
-                          {sortedInfo.label} {fmt(sortedValue, sortedInfo.unit)}
+                          <div>
+                            {selectedSortNutrient.label} {fmt(sortedValue, selectedSortNutrient.unit)} / 100g
+                          </div>
+                          {pu(sortedValue, selectedSortNutrient.unit) && (
+                            <div className="font-normal text-amber-500">
+                              （{unitLabel}：{pu(sortedValue, selectedSortNutrient.unit)}）
+                            </div>
+                          )}
                         </div>
                       ) : (
-                        <div>{fmt(item.calorie_per_100g, 'kcal')} / 100g</div>
+                        <div>
+                          <div>{fmt(item.calorie_per_100g, 'kcal')} / 100g</div>
+                          {pu(item.calorie_per_100g, 'kcal') && (
+                            <div className="text-gray-400">
+                              （{unitLabel}：{pu(item.calorie_per_100g, 'kcal')}）
+                            </div>
+                          )}
+                        </div>
                       )}
-                      <div>¥{fmt(item.price_per_100g, '')} / 100g</div>
+                      <div className="mt-1">
+                        <div>¥{fmt(item.price_per_100g, '')} / 100g</div>
+                        {pu(item.price_per_100g, '') && (
+                          <div className="text-gray-400">
+                            （{unitLabel}：¥{pu(item.price_per_100g, '')}）
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </button>
 
@@ -230,67 +335,59 @@ export default function MasterPage() {
                         <div>1単位の重さ：{fmt(item.unit_weight_g, 'g')}</div>
                         <div>いつもの商品：{item.usual_product_name ?? '―'}</div>
                         <div>購入店：{item.store_name ?? '―'}</div>
+                        <div className="col-span-2">
+                          旬：
+                          {item.peak_season_months && item.peak_season_months.length > 0 ? (
+                            <>
+                              {formatSeasonMonths(item.peak_season_months)}
+                              {isInSeason(item.peak_season_months) && (
+                                <span className="ml-1 rounded bg-pink-100 px-1.5 py-0.5 text-[10px] font-bold text-pink-600">
+                                  今が旬
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            '通年（特になし）'
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="mt-2 border-t border-gray-100 pt-2">
+                        <div className="mb-1 flex items-baseline justify-between text-xs font-semibold text-gray-500">
+                          <span>栄養価（左：100gあたり／右：{unitLabel || '1単位'}あたり）</span>
+                        </div>
+                        <NutrientRow label="カロリー" value={fmt(item.calorie_per_100g, 'kcal')} perUnitText={pu(item.calorie_per_100g, 'kcal')} onInfo={() => setInfoModalKey('calorie_per_100g')} />
+                        <NutrientRow label="たんぱく質" value={fmt(item.protein_g_per_100g, 'g')} perUnitText={pu(item.protein_g_per_100g, 'g')} onInfo={() => setInfoModalKey('protein_g_per_100g')} />
+                        <NutrientRow label="脂質" value={fmt(item.fat_g_per_100g, 'g')} perUnitText={pu(item.fat_g_per_100g, 'g')} onInfo={() => setInfoModalKey('fat_g_per_100g')} />
+                        <NutrientRow label="炭水化物" value={fmt(item.carbohydrate_g_per_100g, 'g')} perUnitText={pu(item.carbohydrate_g_per_100g, 'g')} onInfo={() => setInfoModalKey('carbohydrate_g_per_100g')} />
+                        <NutrientRow label="　糖質" value={fmt(item.sugar_g_per_100g, 'g')} perUnitText={pu(item.sugar_g_per_100g, 'g')} onInfo={() => setInfoModalKey('sugar_g_per_100g')} />
+                        <NutrientRow label="　食物繊維" value={fmt(item.dietary_fiber_g_per_100g, 'g')} perUnitText={pu(item.dietary_fiber_g_per_100g, 'g')} onInfo={() => setInfoModalKey('dietary_fiber_g_per_100g')} />
+                        <NutrientRow label="食塩相当量" value={fmt(item.salt_g_per_100g, 'g')} perUnitText={pu(item.salt_g_per_100g, 'g')} onInfo={() => setInfoModalKey('salt_g_per_100g')} />
                       </div>
 
                       <div className="mt-2 border-t border-gray-100 pt-2">
                         <div className="mb-1 text-xs font-semibold text-gray-500">
-                          栄養価（100gあたり）
+                          ビタミン・ミネラル（左：100gあたり／右：{unitLabel || '1単位'}あたり）
                         </div>
-                        <NutrientRow
-                          label="カロリー"
-                          value={fmt(item.calorie_per_100g, 'kcal')}
-                          onInfo={() => setInfoModalKey('calorie_per_100g')}
-                        />
-                        <NutrientRow
-                          label="たんぱく質"
-                          value={fmt(item.protein_g_per_100g, 'g')}
-                          onInfo={() => setInfoModalKey('protein_g_per_100g')}
-                        />
-                        <NutrientRow
-                          label="脂質"
-                          value={fmt(item.fat_g_per_100g, 'g')}
-                          onInfo={() => setInfoModalKey('fat_g_per_100g')}
-                        />
-                        <NutrientRow
-                          label="炭水化物"
-                          value={fmt(item.carbohydrate_g_per_100g, 'g')}
-                          onInfo={() => setInfoModalKey('carbohydrate_g_per_100g')}
-                        />
-                        <NutrientRow
-                          label="　糖質"
-                          value={fmt(item.sugar_g_per_100g, 'g')}
-                          onInfo={() => setInfoModalKey('sugar_g_per_100g')}
-                        />
-                        <NutrientRow
-                          label="　食物繊維"
-                          value={fmt(item.dietary_fiber_g_per_100g, 'g')}
-                          onInfo={() => setInfoModalKey('dietary_fiber_g_per_100g')}
-                        />
-                        <NutrientRow
-                          label="食塩相当量"
-                          value={fmt(item.salt_g_per_100g, 'g')}
-                          onInfo={() => setInfoModalKey('salt_g_per_100g')}
-                        />
-                      </div>
-
-                      <div className="mt-2 border-t border-gray-100 pt-2">
-                        <div className="mb-1 text-xs font-semibold text-gray-500">
-                          ビタミン・ミネラル（100gあたり）
-                        </div>
-                        <NutrientRow label="ビタミンA" value={fmt(item.vitamin_a_ug_per_100g, 'µg')} onInfo={() => setInfoModalKey('vitamin_a_ug_per_100g')} />
-                        <NutrientRow label="ビタミンB1" value={fmt(item.vitamin_b1_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_b1_mg_per_100g')} />
-                        <NutrientRow label="ビタミンB2" value={fmt(item.vitamin_b2_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_b2_mg_per_100g')} />
-                        <NutrientRow label="ビタミンC" value={fmt(item.vitamin_c_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_c_mg_per_100g')} />
-                        <NutrientRow label="ビタミンD" value={fmt(item.vitamin_d_ug_per_100g, 'µg')} onInfo={() => setInfoModalKey('vitamin_d_ug_per_100g')} />
-                        <NutrientRow label="ビタミンE" value={fmt(item.vitamin_e_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_e_mg_per_100g')} />
-                        <NutrientRow label="カルシウム" value={fmt(item.calcium_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('calcium_mg_per_100g')} />
-                        <NutrientRow label="鉄" value={fmt(item.iron_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('iron_mg_per_100g')} />
-                        <NutrientRow label="亜鉛" value={fmt(item.zinc_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('zinc_mg_per_100g')} />
-                        <NutrientRow label="カリウム" value={fmt(item.potassium_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('potassium_mg_per_100g')} />
+                        <NutrientRow label="ビタミンA" value={fmt(item.vitamin_a_ug_per_100g, 'µg')} perUnitText={pu(item.vitamin_a_ug_per_100g, 'µg')} onInfo={() => setInfoModalKey('vitamin_a_ug_per_100g')} />
+                        <NutrientRow label="ビタミンB1" value={fmt(item.vitamin_b1_mg_per_100g, 'mg')} perUnitText={pu(item.vitamin_b1_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_b1_mg_per_100g')} />
+                        <NutrientRow label="ビタミンB2" value={fmt(item.vitamin_b2_mg_per_100g, 'mg')} perUnitText={pu(item.vitamin_b2_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_b2_mg_per_100g')} />
+                        <NutrientRow label="ビタミンB6" value={fmt(item.vitamin_b6_mg_per_100g, 'mg')} perUnitText={pu(item.vitamin_b6_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_b6_mg_per_100g')} />
+                        <NutrientRow label="ビタミンB12" value={fmt(item.vitamin_b12_ug_per_100g, 'µg')} perUnitText={pu(item.vitamin_b12_ug_per_100g, 'µg')} onInfo={() => setInfoModalKey('vitamin_b12_ug_per_100g')} />
+                        <NutrientRow label="葉酸" value={fmt(item.folate_ug_per_100g, 'µg')} perUnitText={pu(item.folate_ug_per_100g, 'µg')} onInfo={() => setInfoModalKey('folate_ug_per_100g')} />
+                        <NutrientRow label="ビタミンC" value={fmt(item.vitamin_c_mg_per_100g, 'mg')} perUnitText={pu(item.vitamin_c_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_c_mg_per_100g')} />
+                        <NutrientRow label="ビタミンD" value={fmt(item.vitamin_d_ug_per_100g, 'µg')} perUnitText={pu(item.vitamin_d_ug_per_100g, 'µg')} onInfo={() => setInfoModalKey('vitamin_d_ug_per_100g')} />
+                        <NutrientRow label="ビタミンE" value={fmt(item.vitamin_e_mg_per_100g, 'mg')} perUnitText={pu(item.vitamin_e_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('vitamin_e_mg_per_100g')} />
+                        <NutrientRow label="カルシウム" value={fmt(item.calcium_mg_per_100g, 'mg')} perUnitText={pu(item.calcium_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('calcium_mg_per_100g')} />
+                        <NutrientRow label="鉄" value={fmt(item.iron_mg_per_100g, 'mg')} perUnitText={pu(item.iron_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('iron_mg_per_100g')} />
+                        <NutrientRow label="亜鉛" value={fmt(item.zinc_mg_per_100g, 'mg')} perUnitText={pu(item.zinc_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('zinc_mg_per_100g')} />
+                        <NutrientRow label="カリウム" value={fmt(item.potassium_mg_per_100g, 'mg')} perUnitText={pu(item.potassium_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('potassium_mg_per_100g')} />
+                        <NutrientRow label="マグネシウム" value={fmt(item.magnesium_mg_per_100g, 'mg')} perUnitText={pu(item.magnesium_mg_per_100g, 'mg')} onInfo={() => setInfoModalKey('magnesium_mg_per_100g')} />
                       </div>
 
                       <div className="mt-2 border-t border-gray-100 pt-2 text-xs text-gray-400">
                         単価：¥{fmt(item.price_per_100g, '')} / 100g
+                        {pu(item.price_per_100g, '') && ` （${unitLabel}：¥${pu(item.price_per_100g, '')}）`}
                         {item.nutrition_source && (
                           <>
                             {' '}
@@ -318,7 +415,7 @@ export default function MasterPage() {
         )}
       </div>
 
-      {/* 栄養素の効果・不足症状を表示するモーダル */}
+      {/* 栄養素の詳しい効果・不足症状を表示するモーダル（ⓘタップ時） */}
       {infoNutrient && (
         <div
           className="fixed inset-0 z-50 flex items-end bg-black/40 sm:items-center sm:justify-center"
@@ -355,14 +452,16 @@ export default function MasterPage() {
   );
 }
 
-// 栄養価の1行表示（値 ＋ ⓘ情報ボタン）
+// 栄養価の1行表示（値 ＋ ⓘ情報ボタン ＋ 1単位あたりの値）
 function NutrientRow({
   label,
   value,
+  perUnitText,
   onInfo,
 }: {
   label: string;
   value: string;
+  perUnitText: string | null;
   onInfo: () => void;
 }) {
   return (
@@ -373,7 +472,10 @@ function NutrientRow({
           i
         </span>
       </button>
-      <span>{value}</span>
+      <span className="flex items-baseline gap-2">
+        <span>{value}</span>
+        {perUnitText && <span className="text-[11px] text-gray-400">（{perUnitText}）</span>}
+      </span>
     </div>
   );
 }
