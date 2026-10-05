@@ -1,22 +1,74 @@
 ===== vite.config.ts =====
 
+// vite.config.ts（ファイル全体。これで丸ごと置き換えてください）
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    VitePWA({
+      registerType: 'autoUpdate',
+      includeAssets: ['favicon.svg'],
+      manifest: {
+        name: 'かいめし君',
+        short_name: 'かいめし君',
+        description: '家庭向け共有レシピ・買い物リストアプリ',
+        theme_color: '#f59e0b', // amber-500(ログイン画面と同系色)
+        background_color: '#ffffff',
+        display: 'standalone',
+        start_url: '/',
+        scope: '/',
+        icons: [
+          {
+            src: '/icon-192.png',
+            sizes: '192x192',
+            type: 'image/png',
+          },
+          {
+            src: '/icon-512.png',
+            sizes: '512x512',
+            type: 'image/png',
+          },
+          {
+            src: '/icon-maskable-192.png',
+            sizes: '192x192',
+            type: 'image/png',
+            purpose: 'maskable',
+          },
+          {
+            src: '/icon-maskable-512.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'maskable',
+          },
+        ],
+      },
+    }),
+  ],
 })
+
 
 ===== index.html =====
 
+<!-- index.html（ファイル全体。これで丸ごと置き換えてください） -->
 <!doctype html>
-<html lang="en">
+<html lang="ja">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>kaimeshikun</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>かいめし君</title>
+
+    <!-- PWA / iPhoneホーム画面対応 -->
+    <meta name="theme-color" content="#f59e0b" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="かいめし君" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
   </head>
   <body>
     <div id="root"></div>
@@ -58,7 +110,8 @@ export default defineConfig({
     "globals": "^17.12.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.69.0",
-    "vite": "^8.3.0"
+    "vite": "^8.3.0",
+    "vite-plugin-pwa": "^2.0.0"
   }
 }
 
@@ -239,7 +292,7 @@ export default function Layout({ session }: { session: Session }) {
 .
 .
 ===== src\components\LoginPage.tsx =====
-.
+
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
 
@@ -352,10 +405,10 @@ export default function LoginPage() {
       </div>
     </div>
   )
-}
-echo ..
+}.
+
 ===== src\lib\supabaseStorage.ts =====
-echo ..
+
 // ファイル: src/lib/supabaseStorage.ts
 // recipe-images バケット(非公開)から、期限付きの閲覧URLを取得する
 
@@ -379,9 +432,9 @@ export async function getRecipeImageUrl(imagePath: string | null): Promise<strin
 
   return data.signedUrl
 }
-echo ..
+
 ===== src\lib\useRecipeImage.ts =====
-echo ..
+
 // ファイル: src/lib/useRecipeImage.ts
 // レシピ写真のURLを取得するReactフック(署名付きURLをstateで保持)
 
@@ -410,22 +463,262 @@ export function useRecipeImage(imagePath: string | null) {
 
   return url
 }
-echo ..
+
 ===== src\pages\MasterPage.tsx =====
-echo ..
-// ---------- src/pages/MasterPage.tsx ----------
-export default function MasterPage() {
-  return (
-    <div className="flex flex-col items-center justify-center pt-32 text-gray-400">
-      <div className="text-5xl">🥕</div>
-      <p className="mt-3 font-bold">材料マスタ</p>
-      <p className="text-xs">準備中</p>
-    </div>
-  )
+
+import { useEffect, useMemo, useState } from 'react';
+import { supabase } from '../supabaseClient';
+import type { IngredientCategory, IngredientMaster } from '../types/ingredient';
+
+const CATEGORIES: IngredientCategory[] = [
+  '野菜',
+  '肉',
+  '魚介',
+  '乳製品・卵',
+  '調味料',
+  '穀物・麺',
+  'その他',
+  '日用品',
+];
+
+const CATEGORY_COLOR: Record<IngredientCategory, string> = {
+  野菜: 'bg-green-100 text-green-700',
+  肉: 'bg-red-100 text-red-700',
+  魚介: 'bg-blue-100 text-blue-700',
+  '乳製品・卵': 'bg-yellow-100 text-yellow-700',
+  調味料: 'bg-orange-100 text-orange-700',
+  '穀物・麺': 'bg-amber-100 text-amber-700',
+  その他: 'bg-gray-100 text-gray-700',
+  日用品: 'bg-purple-100 text-purple-700',
+};
+
+// 数値を「値がある時だけ」表示するための小さなヘルパー
+function fmt(value: number | null, unit: string) {
+  if (value === null || value === undefined) return '―';
+  return `${value}${unit}`;
 }
-echo ..
+
+export default function MasterPage() {
+  const [items, setItems] = useState<IngredientMaster[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [searchText, setSearchText] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<'すべて' | IngredientCategory>('すべて');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchIngredients = async () => {
+      setLoading(true);
+      setErrorMessage(null);
+      const { data, error } = await supabase
+        .from('ingredient_master')
+        .select('*')
+        .order('category', { ascending: true })
+        .order('ingredient_name', { ascending: true });
+
+      if (error) {
+        setErrorMessage('材料マスタの読み込みに失敗しました。');
+        console.error(error);
+      } else if (data) {
+        setItems(data as IngredientMaster[]);
+      }
+      setLoading(false);
+    };
+
+    fetchIngredients();
+  }, []);
+
+  const filteredItems = useMemo(() => {
+    const keyword = searchText.trim().toLowerCase();
+    return items.filter((item) => {
+      const matchesCategory =
+        selectedCategory === 'すべて' || item.category === selectedCategory;
+      if (!matchesCategory) return false;
+      if (!keyword) return true;
+
+      const haystack = [item.ingredient_name, item.brand_name, item.usual_product_name]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(keyword);
+    });
+  }, [items, searchText, selectedCategory]);
+
+  const toggleExpand = (id: string) => {
+    setExpandedId((prev) => (prev === id ? null : id));
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50 pb-20">
+      {/* 検索バー */}
+      <div className="sticky top-0 z-10 bg-white px-4 pt-4 pb-3 shadow-sm">
+        <input
+          type="text"
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          placeholder="材料名・銘柄で検索"
+          className="w-full rounded-full border border-gray-300 px-4 py-2 text-sm focus:border-amber-500 focus:outline-none"
+        />
+
+        {/* カテゴリ絞り込みチップ */}
+        <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+          {(['すべて', ...CATEGORIES] as const).map((cat) => (
+            <button
+              key={cat}
+              onClick={() => setSelectedCategory(cat)}
+              className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition ${
+                selectedCategory === cat
+                  ? 'bg-amber-500 text-white'
+                  : 'bg-gray-100 text-gray-600'
+              }`}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 件数表示 */}
+      <div className="px-4 pt-3 text-xs text-gray-500">
+        {loading ? '読み込み中…' : `${filteredItems.length}件`}
+      </div>
+
+      {/* エラー表示 */}
+      {errorMessage && (
+        <div className="mx-4 mt-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">
+          {errorMessage}
+        </div>
+      )}
+
+      {/* 一覧 */}
+      <div className="px-4 pt-2">
+        {loading ? (
+          // 読み込み中の仮カード
+          <div className="space-y-2">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="h-16 animate-pulse rounded-xl bg-gray-200" />
+            ))}
+          </div>
+        ) : filteredItems.length === 0 ? (
+          <div className="py-10 text-center text-sm text-gray-400">
+            該当する材料が見つかりませんでした
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {filteredItems.map((item) => {
+              const isExpanded = expandedId === item.id;
+              return (
+                <div
+                  key={item.id}
+                  className="rounded-xl bg-white shadow-sm"
+                >
+                  <button
+                    onClick={() => toggleExpand(item.id)}
+                    className="flex w-full items-center justify-between px-4 py-3 text-left"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`rounded px-2 py-0.5 text-[10px] font-semibold ${CATEGORY_COLOR[item.category]}`}
+                        >
+                          {item.category}
+                        </span>
+                        <span className="truncate font-medium text-gray-800">
+                          {item.ingredient_name}
+                        </span>
+                      </div>
+                      {item.brand_name && (
+                        <div className="mt-0.5 truncate text-xs text-gray-400">
+                          {item.brand_name}
+                        </div>
+                      )}
+                    </div>
+                    <div className="ml-3 shrink-0 text-right text-xs text-gray-500">
+                      <div>{fmt(item.calorie_per_100g, 'kcal')} / 100g</div>
+                      <div>¥{fmt(item.price_per_100g, '')} / 100g</div>
+                    </div>
+                  </button>
+
+                  {/* 展開時：栄養価・単価の詳細 */}
+                  {isExpanded && (
+                    <div className="border-t border-gray-100 px-4 py-3 text-sm">
+                      <div className="mb-2 grid grid-cols-2 gap-x-4 gap-y-1 text-gray-600">
+                        <div>既定の単位：{item.default_unit ?? '―'}</div>
+                        <div>
+                          1単位の重さ：{fmt(item.unit_weight_g, 'g')}
+                        </div>
+                        <div>いつもの商品：{item.usual_product_name ?? '―'}</div>
+                        <div>購入店：{item.store_name ?? '―'}</div>
+                      </div>
+
+                      <div className="mt-2 border-t border-gray-100 pt-2">
+                        <div className="mb-1 text-xs font-semibold text-gray-500">
+                          栄養価（100gあたり）
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-gray-700">
+                          <div>カロリー：{fmt(item.calorie_per_100g, 'kcal')}</div>
+                          <div>たんぱく質：{fmt(item.protein_g_per_100g, 'g')}</div>
+                          <div>脂質：{fmt(item.fat_g_per_100g, 'g')}</div>
+                          <div>炭水化物：{fmt(item.carbohydrate_g_per_100g, 'g')}</div>
+                          <div>　糖質：{fmt(item.sugar_g_per_100g, 'g')}</div>
+                          <div>　食物繊維：{fmt(item.dietary_fiber_g_per_100g, 'g')}</div>
+                          <div>食塩相当量：{fmt(item.salt_g_per_100g, 'g')}</div>
+                        </div>
+                      </div>
+
+                      <div className="mt-2 border-t border-gray-100 pt-2">
+                        <div className="mb-1 text-xs font-semibold text-gray-500">
+                          ビタミン・ミネラル（100gあたり）
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-gray-700">
+                          <div>ビタミンA：{fmt(item.vitamin_a_ug_per_100g, 'µg')}</div>
+                          <div>ビタミンB1：{fmt(item.vitamin_b1_mg_per_100g, 'mg')}</div>
+                          <div>ビタミンB2：{fmt(item.vitamin_b2_mg_per_100g, 'mg')}</div>
+                          <div>ビタミンC：{fmt(item.vitamin_c_mg_per_100g, 'mg')}</div>
+                          <div>ビタミンD：{fmt(item.vitamin_d_ug_per_100g, 'µg')}</div>
+                          <div>ビタミンE：{fmt(item.vitamin_e_mg_per_100g, 'mg')}</div>
+                          <div>カルシウム：{fmt(item.calcium_mg_per_100g, 'mg')}</div>
+                          <div>鉄：{fmt(item.iron_mg_per_100g, 'mg')}</div>
+                          <div>亜鉛：{fmt(item.zinc_mg_per_100g, 'mg')}</div>
+                          <div>カリウム：{fmt(item.potassium_mg_per_100g, 'mg')}</div>
+                        </div>
+                      </div>
+
+                      <div className="mt-2 border-t border-gray-100 pt-2 text-xs text-gray-400">
+                        単価：¥{fmt(item.price_per_100g, '')} / 100g
+                        {item.nutrition_source && (
+                          <>
+                            {' '}
+                            ・ データ出典：
+                            {item.nutrition_source === 'standard_table'
+                              ? '食品成分表'
+                              : item.nutrition_source === 'label'
+                              ? '商品ラベル'
+                              : 'AI推定'}
+                          </>
+                        )}
+                      </div>
+
+                      {item.note && (
+                        <div className="mt-2 border-t border-gray-100 pt-2 text-xs text-gray-500">
+                          メモ：{item.note}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 ===== src\pages\MenuPage.tsx =====
-echo ..
+
 // ---------- src/pages/MenuPage.tsx ----------
 export default function MenuPage() {
   return (
@@ -436,9 +729,9 @@ export default function MenuPage() {
     </div>
   )
 }
-echo ..
+
 ===== src\pages\RecipeDetailPage.tsx =====
-echo ..
+
 // ファイル: src/pages/RecipeDetailPage.tsx
 // レシピ詳細画面:写真・基本情報・材料・工程・「作る予定」トグル
 
@@ -681,9 +974,9 @@ export default function RecipeDetailPage() {
     </div>
   )
 }
-echo ..
+
 ===== src\pages\RecipeListPage.tsx =====
-echo ..
+
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -861,9 +1154,9 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
   )
 }
 
-echo ..
+
 ===== src\pages\SettingsPage.tsx =====
-echo ..
+
 // ---------- src/pages/SettingsPage.tsx ----------
 import { supabase } from '../supabaseClient'
 
@@ -884,9 +1177,9 @@ export default function SettingsPage() {
   )
 }
 
-echo ..
+
 ===== src\pages\ShoppingPage.tsx =====
-echo ..
+
 // ---------- src/pages/ShoppingPage.tsx ----------
 export default function ShoppingPage() {
   return <Placeholder icon="🛒" title="買い物リスト" />
@@ -900,9 +1193,58 @@ function Placeholder({ icon, title }: { icon: string; title: string }) {
     </div>
   )
 }
-echo ..
+
+===== src\types\ingredient.ts =====
+
+export type IngredientCategory =
+  | '野菜'
+  | '肉'
+  | '魚介'
+  | '乳製品・卵'
+  | '調味料'
+  | '穀物・麺'
+  | 'その他'
+  | '日用品';
+
+export type NutritionSource = 'standard_table' | 'label' | 'ai_estimate';
+
+export interface IngredientMaster {
+  id: string;
+  household_id: string;
+  ingredient_name: string;
+  category: IngredientCategory;
+  default_unit: string | null;
+  usual_product_name: string | null;
+  store_name: string | null;
+  note: string | null;
+  brand_name: string | null;
+  unit_weight_g: number | null;
+  price_per_100g: number | null;
+  nutrition_source: NutritionSource | null;
+  calorie_per_100g: number | null;
+  protein_g_per_100g: number | null;
+  fat_g_per_100g: number | null;
+  carbohydrate_g_per_100g: number | null;
+  sugar_g_per_100g: number | null;
+  dietary_fiber_g_per_100g: number | null;
+  salt_g_per_100g: number | null;
+  vitamin_a_ug_per_100g: number | null;
+  vitamin_b1_mg_per_100g: number | null;
+  vitamin_b2_mg_per_100g: number | null;
+  vitamin_c_mg_per_100g: number | null;
+  vitamin_d_ug_per_100g: number | null;
+  vitamin_e_mg_per_100g: number | null;
+  calcium_mg_per_100g: number | null;
+  iron_mg_per_100g: number | null;
+  zinc_mg_per_100g: number | null;
+  potassium_mg_per_100g: number | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 ===== src\types\recipe.ts =====
-echo ..
+
 // src/types/recipe.ts（Recipe型にcooking_time_minutes / cook_countを追加）
 // ファイル: src/types/recipe.ts
 // レシピ関連の型定義
@@ -958,4 +1300,4 @@ export type RecipeWithDetail = Recipe & {
   steps: Step[]
 }
 
-echo ..
+
