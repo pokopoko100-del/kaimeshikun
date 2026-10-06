@@ -1,14 +1,15 @@
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：Supabaseに recipe_nutrition ビューを作成済みであること（01_recipe_nutrition_view.sql）
-// 機能：
-//  ・表示切替：「写真」（YouTube風2列）／「リスト」（材料画面と同じUI）
-//  ・絞り込み：すべて／作る予定（1行目）、ジャンル 和食・洋食・中華・エスニック・その他（2行目）、
-//             サブカテゴリ 主菜・副菜・つまみ・汁物・スープ・麺・丼・ワンプレート・デザート・ソース・調味料（3行目）
-//  ・並び替え：作った回数が多い順（既定）／値段が安い順／カロリーが低い順／調理時間が短い順
-//             ／栄養素が多い順／食塩・脂質・糖質が少ない順
-//  ・値は「1人前あたり」。材料マスタから計算（未計算の材料があれば※表示、並び替えでは後ろへ）
-import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+// 今回の変更：
+//  ・検索ボックスの右横に、写真／リスト切替（アイコン）を配置
+//  ・「すべて／作る予定」の行を廃止。ジャンル（すべて・和食・洋食・中華・エスニック・その他）を1行に
+//  ・サブカテゴリは短い表記にして、横スクロールなしで6個とも見えるように
+//  ・リスト表示：カードを左へスワイプ →「作る予定」に追加／解除（離すと確定）
+//  ・写真表示：サムネ右上の＋ボタンで追加／解除
+//  ・追加／解除のあとに「元に戻す」付きのメッセージを数秒表示
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useOutletContext } from 'react-router-dom'
+import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../supabaseClient'
 import type { Recipe as RecipeBase } from '../types/recipe'
 import type { IngredientMaster } from '../types/ingredient'
@@ -39,7 +40,8 @@ const BUCKET = 'recipe-images'
 // ---------- ジャンル ----------
 const GENRES = ['和食', '洋食', '中華', 'エスニック'] as const
 type GenreFilter = 'すべて' | (typeof GENRES)[number] | 'その他'
-const GENRE_CHIPS: GenreFilter[] = [...GENRES, 'その他']
+// 1行に並べるチップ（先頭の「すべて」はジャンル絞り込みの解除）
+const GENRE_CHIPS: GenreFilter[] = ['すべて', ...GENRES, 'その他']
 
 const GENRE_COLOR: Record<string, string> = {
   和食: 'bg-red-100 text-red-700',
@@ -53,16 +55,17 @@ function genreOf(r: { genre: string | null }): string {
   return r.genre && (GENRES as readonly string[]).includes(r.genre) ? r.genre : 'その他'
 }
 
-// ---------- サブカテゴリ（recipes.category に保存する値） ----------
+// ---------- サブカテゴリ ----------
+// value＝DB(recipes.category)に保存されている値 / label＝チップに出す短い表記
 const CATEGORIES = [
-  '主菜',
-  '副菜・つまみ',
-  '汁物・スープ',
-  '麺・丼・ワンプレート',
-  'デザート',
-  'ソース・調味料',
+  { value: '主菜', label: '主菜' },
+  { value: '副菜・つまみ', label: '副菜' },
+  { value: '汁物・スープ', label: '汁物' },
+  { value: '麺・丼・ワンプレート', label: '麺・丼' },
+  { value: 'デザート', label: 'デザート' },
+  { value: 'ソース・調味料', label: 'ソース' },
 ] as const
-type CategoryFilter = 'すべて' | (typeof CATEGORIES)[number]
+type CategoryFilter = 'すべて' | (typeof CATEGORIES)[number]['value']
 
 // ---------- 並び替えの定義 ----------
 // 栄養素の「多い順」「少ない順」。キーは材料マスタ側の列名（nutrientInfo.ts と共通）
@@ -154,15 +157,19 @@ function fmtVal(value: number | null, unit: string): string {
   return `${roundSmart(value)}${unit}`
 }
 
+type Toast = { message: string; undo: () => void }
+
 export default function RecipeListPage() {
+  const { session } = useOutletContext<{ session: Session }>()
+
   const [recipes, setRecipes] = useState<RecipeRow[]>([])
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [nutritionNotice, setNutritionNotice] = useState<string | null>(null)
+  const [toast, setToast] = useState<Toast | null>(null)
 
   const [keyword, setKeyword] = useState('')
-  const [plannedOnly, setPlannedOnly] = useState(false)
   const [genreFilter, setGenreFilter] = useState<GenreFilter>('すべて')
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('すべて')
   const [sortKey, setSortKey] = useState<string>('cook_count')
@@ -224,11 +231,54 @@ export default function RecipeListPage() {
     })()
   }, [])
 
+  // 「元に戻す」メッセージは4秒で自動的に消す
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 4000)
+    return () => clearTimeout(t)
+  }, [toast])
+
+  // ---------- 作る予定の追加／解除 ----------
+  // 画面に先に反映 → DBを更新 → 失敗したら元に戻す
+  const setPlanned = async (id: string, next: boolean): Promise<boolean> => {
+    setRecipes((list) => list.map((r) => (r.id === id ? { ...r, is_planned: next } : r)))
+    const { data, error: updError } = await supabase
+      .from('recipes')
+      .update({
+        is_planned: next,
+        planned_by: next ? session.user.id : null,
+        planned_at: next ? new Date().toISOString() : null,
+      })
+      .eq('id', id)
+      .select('id')
+
+    if (updError || !data || data.length === 0) {
+      setRecipes((list) => list.map((r) => (r.id === id ? { ...r, is_planned: !next } : r)))
+      alert('更新に失敗しました: ' + (updError?.message ?? '権限を確認してください'))
+      return false
+    }
+    return true
+  }
+
+  const togglePlanned = async (r: RecipeRow) => {
+    const next = !r.is_planned
+    const ok = await setPlanned(r.id, next)
+    if (!ok) return
+    setToast({
+      message: next
+        ? `「${r.dish_name}」を作る予定に追加しました`
+        : `「${r.dish_name}」を作る予定から外しました`,
+      undo: () => {
+        void setPlanned(r.id, !next)
+        setToast(null)
+      },
+    })
+  }
+
   // 絞り込み
   const filtered = useMemo(() => {
     const k = keyword.trim().toLowerCase()
     return recipes.filter((r) => {
-      if (plannedOnly && !r.is_planned) return false
       if (genreFilter !== 'すべて' && genreOf(r) !== genreFilter) return false
       if (categoryFilter !== 'すべて' && r.category !== categoryFilter) return false
       if (!k) return true
@@ -239,7 +289,7 @@ export default function RecipeListPage() {
         (r.category ?? '').toLowerCase().includes(k)
       )
     })
-  }, [recipes, keyword, plannedOnly, genreFilter, categoryFilter])
+  }, [recipes, keyword, genreFilter, categoryFilter])
 
   // 並び替え
   const sorted = useMemo(() => {
@@ -287,71 +337,62 @@ export default function RecipeListPage() {
     return null
   }, [sortKey])
   const sortNutrientCol = sortNutrient ? servingCol(String(sortNutrient.key)) : null
-
-  // 「すべて」：作る予定・ジャンル・サブカテゴリをまとめて解除
-  const handleSelectAll = () => {
-    setPlannedOnly(false)
-    setGenreFilter('すべて')
-    setCategoryFilter('すべて')
-  }
+  const sortNutrientInfo: SortNutrientInfo = sortNutrient
+    ? { label: sortNutrient.label, unit: sortNutrient.unit, col: sortNutrientCol as string }
+    : null
 
   return (
     <div className="min-h-screen bg-gray-50">
       {/* 上部固定エリア */}
       <header className="sticky top-0 z-40 bg-white px-3 pt-3 pb-2 shadow-sm">
-        <input
-          type="search"
-          value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
-          placeholder="🔍 料理名・引用元で検索"
-          className="w-full rounded-full bg-gray-100 px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-300"
-        />
-
-        {/* 1段目：すべて・作る予定　／　右端：表示切替 */}
-        <div className="mt-2 flex items-center gap-2">
-          <Chip
-            active={!plannedOnly && genreFilter === 'すべて' && categoryFilter === 'すべて'}
-            onClick={handleSelectAll}
-          >
-            すべて
-          </Chip>
-          <Chip active={plannedOnly} onClick={() => setPlannedOnly((p) => !p)}>
-            作る予定
-          </Chip>
-          <div className="ml-auto flex overflow-hidden rounded-lg border border-gray-200 text-xs font-bold">
+        {/* 検索ボックス ＋ 右横に 写真／リスト切替 */}
+        <div className="flex items-center gap-2">
+          <input
+            type="search"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            placeholder="🔍 料理名・引用元で検索"
+            className="min-w-0 flex-1 rounded-full bg-gray-100 px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-300"
+          />
+          <div className="flex shrink-0 overflow-hidden rounded-lg border border-gray-200 text-base">
             <button
               onClick={() => changeViewMode('photo')}
-              className={`px-2.5 py-1 ${viewMode === 'photo' ? 'bg-gray-900 text-white' : 'bg-white text-gray-600'}`}
+              aria-label="写真表示"
+              title="写真表示"
+              className={`px-2.5 py-1.5 ${viewMode === 'photo' ? 'bg-gray-900' : 'bg-white opacity-60'}`}
             >
-              🖼️ 写真
+              🖼️
             </button>
             <button
               onClick={() => changeViewMode('list')}
-              className={`px-2.5 py-1 ${viewMode === 'list' ? 'bg-gray-900 text-white' : 'bg-white text-gray-600'}`}
+              aria-label="リスト表示"
+              title="リスト表示"
+              className={`px-2.5 py-1.5 ${viewMode === 'list' ? 'bg-gray-900' : 'bg-white opacity-60'}`}
             >
-              📋 リスト
+              📋
             </button>
           </div>
         </div>
 
-        {/* 2段目：ジャンル */}
-        <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+        {/* 1行目：ジャンル（すべて・和食・洋食・中華・エスニック・その他） */}
+        <div className="mt-2 flex gap-1.5">
           {GENRE_CHIPS.map((g) => (
-            <Chip key={g} active={genreFilter === g} onClick={() => setGenreFilter((prev) => (prev === g ? 'すべて' : g))}>
+            <Chip key={g} fill active={genreFilter === g} onClick={() => setGenreFilter(g)}>
               {g}
             </Chip>
           ))}
         </div>
 
-        {/* 3段目：サブカテゴリ（横スクロール） */}
-        <div className="mt-1 flex gap-2 overflow-x-auto pb-1">
+        {/* 2行目：サブカテゴリ（短い表記。もう一度押すと解除） */}
+        <div className="mt-1.5 flex gap-1.5">
           {CATEGORIES.map((c) => (
             <Chip
-              key={c}
-              active={categoryFilter === c}
-              onClick={() => setCategoryFilter((prev) => (prev === c ? 'すべて' : c))}
+              key={c.value}
+              fill
+              active={categoryFilter === c.value}
+              onClick={() => setCategoryFilter((prev) => (prev === c.value ? 'すべて' : c.value))}
             >
-              {c}
+              {c.label}
             </Chip>
           ))}
         </div>
@@ -403,10 +444,15 @@ export default function RecipeListPage() {
           </select>
         </div>
 
-        {/* 件数（左）＋「1人前あたり」の固定表示（右） */}
-        <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-          <span>{loading ? '読み込み中…' : `${sorted.length}件`}</span>
-          <span className="rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-600">1人前あたり</span>
+        {/* 件数（左）＋ 操作のヒント ＋「1人前あたり」の固定表示（右） */}
+        <div className="mt-2 flex items-center justify-between gap-2 text-xs text-gray-500">
+          <span className="shrink-0">{loading ? '読み込み中…' : `${sorted.length}件`}</span>
+          <span className="min-w-0 truncate text-[10px] text-gray-400">
+            {viewMode === 'list' ? '← 左スワイプで作る予定に追加' : '右上の＋で作る予定に追加'}
+          </span>
+          <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-600">
+            1人前あたり
+          </span>
         </div>
       </header>
 
@@ -425,7 +471,8 @@ export default function RecipeListPage() {
                   key={r.id}
                   recipe={r}
                   imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
-                  sortNutrient={sortNutrient ? { label: sortNutrient.label, unit: sortNutrient.unit, col: sortNutrientCol as string } : null}
+                  sortNutrient={sortNutrientInfo}
+                  onTogglePlanned={() => togglePlanned(r)}
                 />
               ))}
         </div>
@@ -436,12 +483,13 @@ export default function RecipeListPage() {
                 <div key={i} className="h-16 animate-pulse rounded-xl bg-gray-200" />
               ))
             : sorted.map((r) => (
-                <ListCard
-                  key={r.id}
-                  recipe={r}
-                  imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
-                  sortNutrient={sortNutrient ? { label: sortNutrient.label, unit: sortNutrient.unit, col: sortNutrientCol as string } : null}
-                />
+                <SwipeRow key={r.id} planned={r.is_planned} onCommit={() => togglePlanned(r)}>
+                  <ListCard
+                    recipe={r}
+                    imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
+                    sortNutrient={sortNutrientInfo}
+                  />
+                </SwipeRow>
               ))}
         </div>
       )}
@@ -449,21 +497,154 @@ export default function RecipeListPage() {
       {!loading && sorted.length === 0 && (
         <p className="p-8 text-center text-sm text-gray-400">レシピが見つかりません</p>
       )}
+
+      {/* 追加／解除のあとに出る「元に戻す」メッセージ */}
+      {toast && (
+        <div
+          className="pointer-events-none fixed inset-x-0 z-50 flex justify-center px-3"
+          style={{ bottom: 'calc(4.5rem + env(safe-area-inset-bottom))' }}
+        >
+          <div className="pointer-events-auto flex max-w-md items-center gap-3 rounded-xl bg-gray-900 px-4 py-2.5 text-sm text-white shadow-lg">
+            <span className="min-w-0 flex-1 truncate">{toast.message}</span>
+            <button onClick={toast.undo} className="shrink-0 font-bold text-amber-300">
+              元に戻す
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 type SortNutrientInfo = { label: string; unit: string; col: string } | null
 
+// ---------- スワイプ行（左へスワイプ → 離すと「作る予定」を追加／解除） ----------
+const ACTION_W = 104 // 右側に現れる操作エリアの幅(px)
+const COMMIT_W = 72 // これ以上引いて離すと確定(px)
+
+function SwipeRow({
+  planned,
+  onCommit,
+  children,
+}: {
+  planned: boolean
+  onCommit: () => void
+  children: React.ReactNode
+}) {
+  const [dx, setDx] = useState(0)
+  const [dragging, setDragging] = useState(false)
+  const startRef = useRef<{ x: number; y: number } | null>(null)
+  const axisRef = useRef<'h' | 'v' | null>(null)
+  const movedRef = useRef(false)
+
+  const reset = () => {
+    startRef.current = null
+    axisRef.current = null
+    setDragging(false)
+    setDx(0)
+  }
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    startRef.current = { x: e.clientX, y: e.clientY }
+    axisRef.current = null
+    movedRef.current = false
+  }
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const s = startRef.current
+    if (!s) return
+    const mx = e.clientX - s.x
+    const my = e.clientY - s.y
+
+    // 向きが決まるまで様子を見る。縦のほうが大きければ、スワイプとは扱わない（縦スクロール優先）
+    if (axisRef.current === null) {
+      if (Math.abs(mx) < 8 && Math.abs(my) < 8) return
+      if (mx < 0 && Math.abs(mx) > Math.abs(my) * 1.5) {
+        axisRef.current = 'h'
+        setDragging(true)
+        e.currentTarget.setPointerCapture(e.pointerId)
+      } else {
+        axisRef.current = 'v'
+        startRef.current = null
+        return
+      }
+    }
+
+    if (axisRef.current === 'h') {
+      movedRef.current = true
+      setDx(Math.max(-ACTION_W, Math.min(0, mx)))
+    }
+  }
+
+  const onPointerUp = () => {
+    const committed = axisRef.current === 'h' && dx <= -COMMIT_W
+    reset()
+    if (committed) onCommit()
+  }
+
+  // スワイプしたあとの「指を離した瞬間のタップ」で詳細画面へ飛ばないようにする
+  const onClickCapture = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (movedRef.current) {
+      e.preventDefault()
+      e.stopPropagation()
+      movedRef.current = false
+    }
+  }
+
+  const reached = dx <= -COMMIT_W
+  const label = planned
+    ? reached
+      ? '離して解除'
+      : '解除'
+    : reached
+      ? '離して追加'
+      : '＋ 作る予定'
+
+  return (
+    <div className="relative select-none overflow-hidden rounded-xl">
+      {/* 背面：スワイプで現れる操作エリア */}
+      <div
+        className={`absolute inset-y-0 right-0 flex items-center justify-center text-sm font-bold text-white ${
+          planned ? 'bg-gray-500' : 'bg-orange-500'
+        }`}
+        style={{ width: ACTION_W }}
+      >
+        {label}
+      </div>
+
+      {/* 前面：カード本体（縦スクロールはブラウザに任せ、横の動きだけ受け取る） */}
+      <div
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={reset}
+        onClickCapture={onClickCapture}
+        onDragStart={(e) => e.preventDefault()}
+        className="relative bg-white"
+        style={{
+          transform: `translateX(${dx}px)`,
+          transition: dragging ? 'none' : 'transform 0.2s ease-out',
+          touchAction: 'pan-y',
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  )
+}
+
 // ---------- 写真表示（YouTube風2列） ----------
 function PhotoCard({
   recipe: r,
   imageUrl,
   sortNutrient,
+  onTogglePlanned,
 }: {
   recipe: RecipeRow
   imageUrl?: string
   sortNutrient: SortNutrientInfo
+  onTogglePlanned: () => void
 }) {
   const title = r.source_name ? `${r.dish_name} / ${r.source_name}` : r.dish_name
   const kcal = nv(r, 'calorie_per_serving')
@@ -471,36 +652,49 @@ function PhotoCard({
   const unresolved = unresolvedCount(r)
 
   return (
-    <Link to={`/recipes/${r.id}`} className="block active:opacity-70">
-      <div className="relative aspect-video overflow-hidden rounded-xl bg-gray-200">
-        {imageUrl ? (
-          <img src={imageUrl} alt={r.dish_name} loading="lazy" className="h-full w-full object-cover" />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-3xl">🍽️</div>
-        )}
-        {r.is_planned && (
-          <span className="absolute left-1 top-1 rounded bg-orange-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
-            作る予定
-          </span>
-        )}
-        {r.cooking_time_minutes != null && (
-          <span className="absolute bottom-1 right-1 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-bold text-white">
-            ⏱ {r.cooking_time_minutes}分
-          </span>
-        )}
-      </div>
-      <p className="mt-1.5 line-clamp-2 text-[13px] font-bold leading-snug text-gray-900">{title}</p>
-      <p className="mt-0.5 text-[11px] text-gray-500">
-        {sortNutrient
-          ? `${sortNutrient.label} ${fmtVal(nv(r, sortNutrient.col), sortNutrient.unit)}`
-          : fmtVal(kcal, 'kcal')}
-        {' ・ '}
-        {fmtVal(price, '円')}
-        {' ・ '}
-        {r.cook_count}回
-        {unresolved > 0 && <span className="ml-1 text-amber-600">※未計算あり</span>}
-      </p>
-    </Link>
+    <div className="relative">
+      <Link to={`/recipes/${r.id}`} className="block active:opacity-70">
+        <div className="relative aspect-video overflow-hidden rounded-xl bg-gray-200">
+          {imageUrl ? (
+            <img src={imageUrl} alt={r.dish_name} loading="lazy" className="h-full w-full object-cover" />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center text-3xl">🍽️</div>
+          )}
+          {r.is_planned && (
+            <span className="absolute left-1 top-1 rounded bg-orange-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
+              作る予定
+            </span>
+          )}
+          {r.cooking_time_minutes != null && (
+            <span className="absolute bottom-1 right-1 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-bold text-white">
+              ⏱ {r.cooking_time_minutes}分
+            </span>
+          )}
+        </div>
+        <p className="mt-1.5 line-clamp-2 text-[13px] font-bold leading-snug text-gray-900">{title}</p>
+        <p className="mt-0.5 text-[11px] text-gray-500">
+          {sortNutrient
+            ? `${sortNutrient.label} ${fmtVal(nv(r, sortNutrient.col), sortNutrient.unit)}`
+            : fmtVal(kcal, 'kcal')}
+          {' ・ '}
+          {fmtVal(price, '円')}
+          {' ・ '}
+          {r.cook_count}回
+          {unresolved > 0 && <span className="ml-1 text-amber-600">※未計算あり</span>}
+        </p>
+      </Link>
+
+      {/* 作る予定の追加／解除（Linkの外に置いて、タップしても詳細へ飛ばないようにする） */}
+      <button
+        onClick={onTogglePlanned}
+        aria-label={r.is_planned ? '作る予定から外す' : '作る予定に追加'}
+        className={`absolute right-1.5 top-1.5 flex h-8 w-8 items-center justify-center rounded-full text-lg font-bold shadow ${
+          r.is_planned ? 'bg-orange-500 text-white' : 'bg-white/90 text-gray-700'
+        }`}
+      >
+        {r.is_planned ? '✓' : '＋'}
+      </button>
+    </div>
   )
 }
 
@@ -520,7 +714,7 @@ function ListCard({
   const unresolved = unresolvedCount(r)
 
   return (
-    <Link to={`/recipes/${r.id}`} className="block rounded-xl bg-white shadow-sm active:opacity-70">
+    <Link to={`/recipes/${r.id}`} draggable={false} className="block rounded-xl bg-white shadow-sm active:opacity-70">
       <div className="flex items-center px-4 py-3">
         {/* 左：①ジャンル＋サブカテゴリ＋作る予定 ②料理名 ③引用元（左揃え） */}
         <div className="min-w-0 flex-1 text-left">
@@ -542,7 +736,7 @@ function ListCard({
         {/* 中央：サムネ（写真があるときだけ小さく） */}
         {imageUrl && (
           <div className="mx-2 h-11 w-11 shrink-0 overflow-hidden rounded-lg border border-gray-200 bg-gray-100">
-            <img src={imageUrl} alt={r.dish_name} loading="lazy" className="h-full w-full object-cover" />
+            <img src={imageUrl} alt={r.dish_name} loading="lazy" draggable={false} className="h-full w-full object-cover" />
           </div>
         )}
 
@@ -578,21 +772,24 @@ function SkeletonCard() {
   )
 }
 
+// fill を付けると、1行に並べたとき均等な幅に広がる（横スクロールなしで収める用）
 function Chip({
   active,
   onClick,
+  fill,
   children,
 }: {
   active: boolean
   onClick: () => void
+  fill?: boolean
   children: React.ReactNode
 }) {
   return (
     <button
       onClick={onClick}
-      className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition ${
-        active ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-600'
-      }`}
+      className={`whitespace-nowrap rounded-full py-1 text-xs font-medium transition ${
+        fill ? 'min-w-0 flex-1 px-1 text-center' : 'px-3'
+      } ${active ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-600'}`}
     >
       {children}
     </button>

@@ -1,1 +1,17 @@
+/* src/index.css（ファイル全体。これで丸ごと置き換えてください） */
 @import "tailwindcss";
+
+/* ズーム無効①：ダブルタップでの拡大を防ぐ */
+html {
+  touch-action: manipulation;
+}
+
+/* ズーム無効②：iPhoneは文字が16px未満の入力欄をタップすると画面が勝手に拡大されるため、
+   タッチ端末（スマホ・タブレット）だけ入力欄の文字を16pxにそろえる。PCの見た目は変わらない */
+@media (hover: none) and (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
