@@ -1,12 +1,12 @@
-// src/components/Layout.tsx（全体を置き換え）※タブ順を「レシピ・材料・買い物・献立・設定」に変更
+// src/components/Layout.tsx（全体を置き換え）※タブ順を「レシピ・材料・献立・買い物・設定」に変更
 import { NavLink, Outlet } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
 
 const tabs = [
   { to: '/recipes',  icon: '🍳', label: 'レシピ' },
   { to: '/master',   icon: '🥕', label: '材料' },
-  { to: '/shopping', icon: '🛒', label: '買い物' },
   { to: '/menu',     icon: '📅', label: '献立' },
+  { to: '/shopping', icon: '🛒', label: '買い物' },
   { to: '/settings', icon: '⚙️', label: '設定' },
 ]
 

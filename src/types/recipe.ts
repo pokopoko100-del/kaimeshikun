@@ -1,6 +1,8 @@
-// src/types/recipe.ts（Recipe型にcooking_time_minutes / cook_countを追加）
+// src/types/recipe.ts（ファイル全体。これで丸ごと置き換えてください）
+// 変更点：Recipe型に plan_confirmed（献立に確定済みかどうか）を追加
 // ファイル: src/types/recipe.ts
 // レシピ関連の型定義
+
 export type Recipe = {
   id: string
   household_id: string
@@ -15,10 +17,11 @@ export type Recipe = {
   original_servings: number | null
   calories_per_serving: number | null
   cost_per_serving: number | null
-  cooking_time_minutes: number | null // ★追加：調理時間(分)
-  cook_count: number                  // ★追加：作成回数
+  cooking_time_minutes: number | null // 調理時間(分)
+  cook_count: number                  // 作成回数
   image_path: string | null
-  is_planned: boolean
+  is_planned: boolean                 // 献立に入っている（候補 or 確定）
+  plan_confirmed: boolean             // ★追加：献立に確定済み（is_planned が true のときだけ意味を持つ）
   planned_by: string | null
   planned_at: string | null
   registration_method: string | null

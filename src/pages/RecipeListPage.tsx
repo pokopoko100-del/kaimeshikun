@@ -1,12 +1,12 @@
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 前提：Supabaseに recipe_nutrition ビューを作成済みであること（01_recipe_nutrition_view.sql）
-// 今回の変更：
-//  ・検索ボックスの右横に、写真／リスト切替（アイコン）を配置
-//  ・「すべて／作る予定」の行を廃止。ジャンル（すべて・和食・洋食・中華・エスニック・その他）を1行に
-//  ・サブカテゴリは短い表記にして、横スクロールなしで6個とも見えるように
-//  ・リスト表示：カードを左へスワイプ →「作る予定」に追加／解除（離すと確定）
-//  ・写真表示：サムネ右上の＋ボタンで追加／解除
+// 前提：recipe_nutrition ビュー（01）と、recipes.plan_confirmed 列（09）を作成済みであること
+// 機能：
+//  ・検索ボックスの右横に、写真／リスト切替
+//  ・ジャンル（すべて・和食・洋食・中華・エスニック・その他）を1行、サブカテゴリ（6分類）を1行
+//  ・リスト表示：カードを左へスワイプ →「献立候補」に追加／献立から外す（離すと確定）
+//  ・写真表示：サムネ右上の＋ボタンで 候補に追加／外す
 //  ・追加／解除のあとに「元に戻す」付きのメッセージを数秒表示
+//  ・カードのバッジ：「候補」「確定」で献立の状態を表示（確定・作ったは献立画面で行う）
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useOutletContext } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
@@ -27,6 +27,7 @@ type Recipe = Pick<
   | 'cook_count'
   | 'image_path'
   | 'is_planned'
+  | 'plan_confirmed'
   | 'updated_at'
 >
 
@@ -157,6 +158,12 @@ function fmtVal(value: number | null, unit: string): string {
   return `${roundSmart(value)}${unit}`
 }
 
+// 献立の状態：候補／確定／なし
+function planLabel(r: Pick<Recipe, 'is_planned' | 'plan_confirmed'>): '確定' | '候補' | null {
+  if (!r.is_planned) return null
+  return r.plan_confirmed ? '確定' : '候補'
+}
+
 type Toast = { message: string; undo: () => void }
 
 export default function RecipeListPage() {
@@ -188,7 +195,7 @@ export default function RecipeListPage() {
         supabase
           .from('recipes')
           .select(
-            'id, dish_name, genre, category, source_name, cooking_time_minutes, cook_count, image_path, is_planned, updated_at',
+            'id, dish_name, genre, category, source_name, cooking_time_minutes, cook_count, image_path, is_planned, plan_confirmed, updated_at',
           )
           .order('updated_at', { ascending: false }),
         supabase.from('recipe_nutrition').select('*'),
@@ -238,22 +245,34 @@ export default function RecipeListPage() {
     return () => clearTimeout(t)
   }, [toast])
 
-  // ---------- 作る予定の追加／解除 ----------
+  // ---------- 献立候補の追加／献立から外す ----------
+  // 追加は「候補」から始める（確定は献立画面）。外すときは確定も解除する
   // 画面に先に反映 → DBを更新 → 失敗したら元に戻す
-  const setPlanned = async (id: string, next: boolean): Promise<boolean> => {
-    setRecipes((list) => list.map((r) => (r.id === id ? { ...r, is_planned: next } : r)))
+  const setMenuState = async (
+    id: string,
+    state: { is_planned: boolean; plan_confirmed: boolean },
+  ): Promise<boolean> => {
+    const prev = recipes.find((r) => r.id === id)
+    setRecipes((list) => list.map((r) => (r.id === id ? { ...r, ...state } : r)))
     const { data, error: updError } = await supabase
       .from('recipes')
       .update({
-        is_planned: next,
-        planned_by: next ? session.user.id : null,
-        planned_at: next ? new Date().toISOString() : null,
+        is_planned: state.is_planned,
+        plan_confirmed: state.plan_confirmed,
+        planned_by: state.is_planned ? session.user.id : null,
+        planned_at: state.is_planned ? new Date().toISOString() : null,
       })
       .eq('id', id)
       .select('id')
 
     if (updError || !data || data.length === 0) {
-      setRecipes((list) => list.map((r) => (r.id === id ? { ...r, is_planned: !next } : r)))
+      if (prev) {
+        setRecipes((list) =>
+          list.map((r) =>
+            r.id === id ? { ...r, is_planned: prev.is_planned, plan_confirmed: prev.plan_confirmed } : r,
+          ),
+        )
+      }
       alert('更新に失敗しました: ' + (updError?.message ?? '権限を確認してください'))
       return false
     }
@@ -261,15 +280,19 @@ export default function RecipeListPage() {
   }
 
   const togglePlanned = async (r: RecipeRow) => {
-    const next = !r.is_planned
-    const ok = await setPlanned(r.id, next)
+    const before = { is_planned: r.is_planned, plan_confirmed: r.plan_confirmed }
+    const adding = !r.is_planned
+    const ok = await setMenuState(
+      r.id,
+      adding ? { is_planned: true, plan_confirmed: false } : { is_planned: false, plan_confirmed: false },
+    )
     if (!ok) return
     setToast({
-      message: next
-        ? `「${r.dish_name}」を作る予定に追加しました`
-        : `「${r.dish_name}」を作る予定から外しました`,
+      message: adding
+        ? `「${r.dish_name}」を献立候補に追加しました`
+        : `「${r.dish_name}」を献立から外しました`,
       undo: () => {
-        void setPlanned(r.id, !next)
+        void setMenuState(r.id, before)
         setToast(null)
       },
     })
@@ -448,7 +471,7 @@ export default function RecipeListPage() {
         <div className="mt-2 flex items-center justify-between gap-2 text-xs text-gray-500">
           <span className="shrink-0">{loading ? '読み込み中…' : `${sorted.length}件`}</span>
           <span className="min-w-0 truncate text-[10px] text-gray-400">
-            {viewMode === 'list' ? '← 左スワイプで作る予定に追加' : '右上の＋で作る予定に追加'}
+            {viewMode === 'list' ? '← 左スワイプで献立候補に追加' : '右上の＋で献立候補に追加'}
           </span>
           <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-600">
             1人前あたり
@@ -518,7 +541,22 @@ export default function RecipeListPage() {
 
 type SortNutrientInfo = { label: string; unit: string; col: string } | null
 
-// ---------- スワイプ行（左へスワイプ → 離すと「作る予定」を追加／解除） ----------
+// 献立の状態バッジ（候補＝オレンジの薄色／確定＝緑）
+function PlanBadge({ recipe }: { recipe: Pick<Recipe, 'is_planned' | 'plan_confirmed'> }) {
+  const label = planLabel(recipe)
+  if (!label) return null
+  return (
+    <span
+      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${
+        label === '確定' ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-600'
+      }`}
+    >
+      {label}
+    </span>
+  )
+}
+
+// ---------- スワイプ行（左へスワイプ → 離すと「献立候補に追加」／「献立から外す」） ----------
 const ACTION_W = 104 // 右側に現れる操作エリアの幅(px)
 const COMMIT_W = 72 // これ以上引いて離すと確定(px)
 
@@ -595,17 +633,17 @@ function SwipeRow({
   const reached = dx <= -COMMIT_W
   const label = planned
     ? reached
-      ? '離して解除'
-      : '解除'
+      ? '離して外す'
+      : '献立から外す'
     : reached
       ? '離して追加'
-      : '＋ 作る予定'
+      : '＋ 献立候補'
 
   return (
     <div className="relative select-none overflow-hidden rounded-xl">
       {/* 背面：スワイプで現れる操作エリア */}
       <div
-        className={`absolute inset-y-0 right-0 flex items-center justify-center text-sm font-bold text-white ${
+        className={`absolute inset-y-0 right-0 flex items-center justify-center px-1 text-center text-sm font-bold leading-tight text-white ${
           planned ? 'bg-gray-500' : 'bg-orange-500'
         }`}
         style={{ width: ACTION_W }}
@@ -650,6 +688,7 @@ function PhotoCard({
   const kcal = nv(r, 'calorie_per_serving')
   const price = nv(r, 'price_per_serving')
   const unresolved = unresolvedCount(r)
+  const label = planLabel(r)
 
   return (
     <div className="relative">
@@ -660,9 +699,13 @@ function PhotoCard({
           ) : (
             <div className="flex h-full w-full items-center justify-center text-3xl">🍽️</div>
           )}
-          {r.is_planned && (
-            <span className="absolute left-1 top-1 rounded bg-orange-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
-              作る予定
+          {label && (
+            <span
+              className={`absolute left-1 top-1 rounded px-1.5 py-0.5 text-[10px] font-bold text-white ${
+                label === '確定' ? 'bg-green-600' : 'bg-orange-500'
+              }`}
+            >
+              {label}
             </span>
           )}
           {r.cooking_time_minutes != null && (
@@ -684,10 +727,10 @@ function PhotoCard({
         </p>
       </Link>
 
-      {/* 作る予定の追加／解除（Linkの外に置いて、タップしても詳細へ飛ばないようにする） */}
+      {/* 献立候補の追加／外す（Linkの外に置いて、タップしても詳細へ飛ばないようにする） */}
       <button
         onClick={onTogglePlanned}
-        aria-label={r.is_planned ? '作る予定から外す' : '作る予定に追加'}
+        aria-label={r.is_planned ? '献立から外す' : '献立候補に追加'}
         className={`absolute right-1.5 top-1.5 flex h-8 w-8 items-center justify-center rounded-full text-lg font-bold shadow ${
           r.is_planned ? 'bg-orange-500 text-white' : 'bg-white/90 text-gray-700'
         }`}
@@ -716,18 +759,14 @@ function ListCard({
   return (
     <Link to={`/recipes/${r.id}`} draggable={false} className="block rounded-xl bg-white shadow-sm active:opacity-70">
       <div className="flex items-center px-4 py-3">
-        {/* 左：①ジャンル＋サブカテゴリ＋作る予定 ②料理名 ③引用元（左揃え） */}
+        {/* 左：①ジャンル＋サブカテゴリ＋献立の状態 ②料理名 ③引用元（左揃え） */}
         <div className="min-w-0 flex-1 text-left">
           <div className="flex items-center gap-1.5">
             <span className={`shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold ${GENRE_COLOR[genre]}`}>{genre}</span>
             {r.category && (
               <span className="truncate rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">{r.category}</span>
             )}
-            {r.is_planned && (
-              <span className="shrink-0 rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-600">
-                作る予定
-              </span>
-            )}
+            <PlanBadge recipe={r} />
           </div>
           <div className="mt-1 truncate font-medium text-gray-800">{r.dish_name}</div>
           {r.source_name && <div className="mt-0.5 truncate text-xs text-gray-400">{r.source_name}</div>}

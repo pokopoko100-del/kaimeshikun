@@ -1,10 +1,13 @@
 // src/pages/RecipeDetailPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の修正：
-//  ・カロリー／費用／栄養素を、recipes の手入力列ではなく recipe_nutrition ビュー（材料マスタから計算）から表示
-//  ・値は「1人前あたり」＋ 合計（人前数 × 1人前）
-//  ・栄養素（たんぱく質・ビタミン・ミネラルなど）を「栄養素（1人前あたり）」として追加（タップで開閉）
-//  ・計算できていない材料には「未計算」マークを付け、上部にも件数を表示
-//  ・作る予定トグル・材料・作り方・参考元は従来どおり
+// 前提：recipe_nutrition ビュー（01）と、recipes.plan_confirmed 列（09）を作成済みであること
+// 今回の変更：
+//  ・「作る予定」ボタンを「献立候補」に変更。状態は 未追加／候補／確定 の3つを表示
+//  ・追加は「候補」から。外すときは確定も解除（確定・作ったは献立画面で行う）
+// これまでの内容：
+//  ・カロリー／費用／栄養素は recipe_nutrition ビュー（材料マスタから計算）から表示（1人前あたり＋合計）
+//  ・栄養素（たんぱく質・ビタミン・ミネラルなど）をタップで開閉
+//  ・計算できていない材料には「未計算」マーク
+//  ・分量は「大さじ3」のように、大さじ・小さじは単位を先頭に表示
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
@@ -173,25 +176,28 @@ export default function RecipeDetailPage() {
     }
   }, [id])
 
+  // 献立候補の追加／外す。追加は「候補」から。外すときは確定も解除する
   const handleTogglePlanned = async () => {
     if (!recipe) return
     setTogglingPlanned(true)
-    const nextIsPlanned = !recipe.is_planned
-    const { error } = await supabase
+    const adding = !recipe.is_planned
+    const { data, error } = await supabase
       .from('recipes')
       .update({
-        is_planned: nextIsPlanned,
-        planned_by: nextIsPlanned ? session.user.id : null,
-        planned_at: nextIsPlanned ? new Date().toISOString() : null,
+        is_planned: adding,
+        plan_confirmed: false,
+        planned_by: adding ? session.user.id : null,
+        planned_at: adding ? new Date().toISOString() : null,
       })
       .eq('id', recipe.id)
+      .select('id')
     setTogglingPlanned(false)
 
-    if (error) {
-      alert('更新に失敗しました: ' + error.message)
+    if (error || !data || data.length === 0) {
+      alert('更新に失敗しました: ' + (error?.message ?? '権限を確認してください'))
       return
     }
-    setRecipe({ ...recipe, is_planned: nextIsPlanned })
+    setRecipe({ ...recipe, is_planned: adding, plan_confirmed: false })
   }
 
   // 未計算の材料（分量が「適量」などのものは数えない）
@@ -241,6 +247,13 @@ export default function RecipeDetailPage() {
   const totalCost = costPer != null ? Math.round(costPer * recipe.servings) : null
   const unresolvedCount = unresolvedSet.size
 
+  // 献立の状態：未追加／候補／確定
+  const planState: 'none' | 'candidate' | 'confirmed' = !recipe.is_planned
+    ? 'none'
+    : recipe.plan_confirmed
+      ? 'confirmed'
+      : 'candidate'
+
   return (
     <div className="max-w-md mx-auto pb-6">
       {/* 写真 */}
@@ -272,18 +285,27 @@ export default function RecipeDetailPage() {
           {recipe.cook_count}回作った
         </p>
 
-        {/* 作る予定トグル */}
+        {/* 献立候補トグル（確定・作ったは献立画面で行う） */}
         <button
           onClick={handleTogglePlanned}
           disabled={togglingPlanned}
           className={`mt-4 w-full rounded-lg py-2.5 font-semibold transition disabled:opacity-50 ${
-            recipe.is_planned
-              ? 'bg-amber-100 text-amber-700 border border-amber-400'
-              : 'bg-amber-500 text-white'
+            planState === 'none'
+              ? 'bg-amber-500 text-white'
+              : planState === 'candidate'
+                ? 'bg-amber-100 text-amber-700 border border-amber-400'
+                : 'bg-green-100 text-green-700 border border-green-400'
           }`}
         >
-          {recipe.is_planned ? '✓ 作る予定に入っています(タップで解除)' : '作る予定に追加する'}
+          {planState === 'none' && '献立候補に追加する'}
+          {planState === 'candidate' && '✓ 献立候補に入っています(タップで外す)'}
+          {planState === 'confirmed' && '✓ 献立に確定済みです(タップで外す)'}
         </button>
+        {planState !== 'none' && (
+          <p className="mt-1 text-center text-[11px] text-gray-400">
+            確定・作ったの操作は、下の「献立」タブで行えます
+          </p>
+        )}
 
         {/* カロリー・費用（材料マスタから計算した1人前あたり） */}
         <div className="grid grid-cols-2 gap-3 mt-4">
