@@ -1,27 +1,30 @@
 // src/pages/MenuPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：09_menu_status_migration.sql を実行済み（recipes.plan_confirmed 列がある）
-// 献立画面：日割りなし。「確定」と「候補」の2つのリストを並べる
-//   候補  ：［確定する］［外す］
-//   確定  ：［作った］［候補に戻す］［外す］
-//     作った      … 作った回数を +1 して、献立から外す
-//     外す        … 献立から外す（レシピ自体は消えません）
-//     候補に戻す  … 確定を取り消して、候補に戻す
+// 献立画面：日割りなし。「確定」と「候補」の2つのリストを、小さな行（料理名＋引用元）で並べる（ボタンなし・スワイプで操作）
+//   【候補】 → 右スワイプ：確定に追加 ／ ← 左スワイプ：削除（献立から外す。レシピは残る）
+//   【確定】 → 右スワイプ：作った（作った回数 +1、献立から外れる） ／ ← 左スワイプ：候補に戻す
 // 操作のあとに「元に戻す」付きのメッセージを数秒表示
+// 一番上に「🛒 買い物リストに追加」ボタン（確定した料理の材料を合計 → 選択・数量変更 → 確定で買い物リストへ）
+// 上のバーはなし。人数切替は「確定」見出しの右端（共通設定。一覧・詳細と同じ人数で表示）
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate, useOutletContext } from 'react-router-dom'
+import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../supabaseClient'
 import type { Recipe as RecipeBase } from '../types/recipe'
+import SwipeRow from '../components/SwipeRow'
+import type { SwipeAction } from '../components/SwipeRow'
+import ServingsStepper from '../components/ServingsStepper'
+import ShoppingAddSheet from '../components/ShoppingAddSheet'
+import { useServings } from '../lib/useServings'
 
 type Recipe = Pick<
   RecipeBase,
   | 'id'
   | 'dish_name'
-  | 'genre'
-  | 'category'
+  | 'servings'
   | 'source_name'
   | 'cooking_time_minutes'
   | 'cook_count'
-  | 'image_path'
   | 'is_planned'
   | 'plan_confirmed'
   | 'planned_by'
@@ -29,8 +32,8 @@ type Recipe = Pick<
 >
 
 type MenuRow = Recipe & {
-  kcal: number | null
-  price: number | null
+  kcal: number | null // 1人前あたり
+  price: number | null // 1人前あたり
   unresolved: number
 }
 
@@ -43,21 +46,7 @@ type Patch = {
   cook_count: number
 }
 
-type Toast = { message: string; undo: () => void }
-
-const BUCKET = 'recipe-images'
-
-const GENRES = ['和食', '洋食', '中華', 'エスニック'] as const
-const GENRE_COLOR: Record<string, string> = {
-  和食: 'bg-red-100 text-red-700',
-  洋食: 'bg-blue-100 text-blue-700',
-  中華: 'bg-orange-100 text-orange-700',
-  エスニック: 'bg-green-100 text-green-700',
-  その他: 'bg-gray-100 text-gray-700',
-}
-function genreOf(r: { genre: string | null }): string {
-  return r.genre && (GENRES as readonly string[]).includes(r.genre) ? r.genre : 'その他'
-}
+type Toast = { message: string; actionLabel: string; onAction: () => void }
 
 function roundSmart(value: number): number {
   const abs = Math.abs(value)
@@ -90,20 +79,29 @@ function errorText(e: unknown): string {
   return '不明なエラー'
 }
 
+// スワイプのラベル
+const ACT_CONFIRM: SwipeAction = { label: '✅ 確定', readyLabel: '離して確定', className: 'bg-green-600' }
+const ACT_DELETE: SwipeAction = { label: '削除', readyLabel: '離して削除', className: 'bg-red-500' }
+const ACT_COOKED: SwipeAction = { label: '🍳 作った', readyLabel: '離して作った', className: 'bg-amber-500' }
+const ACT_BACK: SwipeAction = { label: '↩ 候補に戻す', readyLabel: '離して戻す', className: 'bg-gray-500' }
+
 export default function MenuPage() {
   const [rows, setRows] = useState<MenuRow[]>([])
-  const [imageUrls, setImageUrls] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [busyId, setBusyId] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
+  const [servings, setServings] = useServings()
+  const [showAdd, setShowAdd] = useState(false) // 「買い物リストに追加」の確認画面
+  const { session } = useOutletContext<{ session: Session }>()
+  const navigate = useNavigate()
 
   useEffect(() => {
     ;(async () => {
       const { data, error: recErr } = await supabase
         .from('recipes')
         .select(
-          'id, dish_name, genre, category, source_name, cooking_time_minutes, cook_count, image_path, is_planned, plan_confirmed, planned_by, planned_at',
+          'id, dish_name, servings, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at',
         )
         .eq('is_planned', true)
 
@@ -142,17 +140,6 @@ export default function MenuPage() {
           return { ...r, kcal: n?.kcal ?? null, price: n?.price ?? null, unresolved: n?.unresolved ?? 0 }
         }),
       )
-
-      // 非公開バケットなので署名付きURLをまとめて発行（1時間有効）
-      const paths = recipes.map((r) => r.image_path).filter((p): p is string => !!p)
-      if (paths.length > 0) {
-        const { data: signed } = await supabase.storage.from(BUCKET).createSignedUrls(paths, 3600)
-        const map: Record<string, string> = {}
-        signed?.forEach((s) => {
-          if (s.path && s.signedUrl) map[s.path] = s.signedUrl
-        })
-        setImageUrls(map)
-      }
       setLoading(false)
     })()
   }, [])
@@ -180,15 +167,16 @@ export default function MenuPage() {
   }
 
   const act = async (row: MenuRow, patch: Patch, message: string) => {
-    if (busyId) return
-    setBusyId(row.id)
+    if (busy) return
+    setBusy(true)
     const before = snapshot(row)
     const ok = await applyPatch(row.id, patch)
-    setBusyId(null)
+    setBusy(false)
     if (!ok) return
     setToast({
       message,
-      undo: () => {
+      actionLabel: '元に戻す',
+      onAction: () => {
         void applyPatch(row.id, before)
         setToast(null)
       },
@@ -206,7 +194,7 @@ export default function MenuPage() {
     act(
       r,
       { ...snapshot(r), is_planned: false, plan_confirmed: false, planned_by: null, planned_at: null },
-      `「${r.dish_name}」を献立から外しました`,
+      `「${r.dish_name}」を献立から削除しました（レシピは残ります）`,
     )
 
   const markCooked = (r: MenuRow) =>
@@ -219,7 +207,7 @@ export default function MenuPage() {
         planned_at: null,
         cook_count: r.cook_count + 1,
       },
-      `「${r.dish_name}」を作りました（作った回数 ${r.cook_count + 1}回）`,
+      `「${r.dish_name}」を作りました（${r.cook_count + 1}回目）`,
     )
 
   // 確定／候補に分ける（追加した順に並べる。新しいものが上）
@@ -233,83 +221,101 @@ export default function MenuPage() {
   }, [rows])
 
   return (
-    <div className="min-h-screen bg-gray-50 pb-8">
-      <header className="sticky top-0 z-40 bg-white px-4 pb-3 pt-4 shadow-sm">
-        <h1 className="text-lg font-bold text-gray-900">📅 献立</h1>
-        <p className="mt-0.5 text-xs text-gray-400">
-          レシピ一覧から「候補」に追加 → 決まったら「確定」にします
-        </p>
-      </header>
-
+    <div className="min-h-screen bg-gray-50 pb-6">
       {error && <p className="p-4 text-sm text-red-600">読み込みエラー：{error}</p>}
 
       {loading ? (
-        <div className="space-y-2 p-3">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-24 animate-pulse rounded-xl bg-gray-200" />
+        <div className="space-y-1.5 p-2">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="h-12 animate-pulse rounded-lg bg-gray-200" />
           ))}
         </div>
       ) : (
-        <div className="space-y-6 p-3">
-          {/* 確定 */}
-          <section>
-            <SectionTitle icon="✅" title="確定" count={confirmed.length} sub="作る予定の料理" />
-            {confirmed.length === 0 ? (
-              <Empty text="確定した料理はまだありません。候補から「確定する」を押してください。" />
-            ) : (
-              <div className="space-y-2">
-                {confirmed.map((r) => (
-                  <MenuCard
-                    key={r.id}
-                    row={r}
-                    imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
-                    busy={busyId === r.id}
-                  >
-                    <ActionButton kind="primary" onClick={() => markCooked(r)} disabled={busyId !== null}>
-                      🍳 作った
-                    </ActionButton>
-                    <ActionButton onClick={() => backToCandidate(r)} disabled={busyId !== null}>
-                      ↩ 候補に戻す
-                    </ActionButton>
-                    <ActionButton kind="danger" onClick={() => removeFromMenu(r)} disabled={busyId !== null}>
-                      外す
-                    </ActionButton>
-                  </MenuCard>
-                ))}
-              </div>
-            )}
-          </section>
+        <div className="px-2 pt-2">
+          {/* 一番上：買い物リストに追加（確定した料理の材料を合計して、選んで追加する） */}
+          <button
+            onClick={() => setShowAdd(true)}
+            disabled={confirmed.length === 0}
+            className="mb-3 w-full rounded-lg bg-amber-500 py-2.5 text-sm font-bold text-white shadow-sm active:opacity-80 disabled:bg-gray-300"
+          >
+            {confirmed.length === 0
+              ? '🛒 買い物リストに追加（確定した料理がありません）'
+              : `🛒 買い物リストに追加（確定 ${confirmed.length}品）`}
+          </button>
+
+          {/* 確定（見出しの右端に人数切替） */}
+          <SectionTitle
+            icon="✅"
+            title="確定"
+            count={confirmed.length}
+            hint="→作った ←戻す"
+            trailing={<ServingsStepper value={servings} onChange={setServings} />}
+          />
+          {confirmed.length === 0 ? (
+            <Empty text="確定した料理はありません（候補を右にスワイプ）" />
+          ) : (
+            <div className="space-y-1">
+              {confirmed.map((r) => (
+                <SwipeRow
+                  key={r.id}
+                  right={ACT_COOKED}
+                  left={ACT_BACK}
+                  onSwipeRight={() => markCooked(r)}
+                  onSwipeLeft={() => backToCandidate(r)}
+                >
+                  <MenuLine row={r} servings={servings} />
+                </SwipeRow>
+              ))}
+            </div>
+          )}
 
           {/* 候補 */}
-          <section>
-            <SectionTitle icon="💭" title="候補" count={candidates.length} sub="迷い中の料理" />
-            {candidates.length === 0 ? (
-              <Empty text="候補はまだありません。レシピ一覧で、左スワイプ（写真表示は右上の＋）で追加できます。" />
-            ) : (
-              <div className="space-y-2">
-                {candidates.map((r) => (
-                  <MenuCard
-                    key={r.id}
-                    row={r}
-                    imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
-                    busy={busyId === r.id}
-                  >
-                    <ActionButton kind="primary" onClick={() => confirm(r)} disabled={busyId !== null}>
-                      ✅ 確定する
-                    </ActionButton>
-                    <ActionButton kind="danger" onClick={() => removeFromMenu(r)} disabled={busyId !== null}>
-                      外す
-                    </ActionButton>
-                  </MenuCard>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <p className="px-1 text-[11px] leading-relaxed text-gray-400">
-            ※「外す」は献立から外すだけで、レシピ自体は消えません。「作った」を押すと作った回数が1回増えて、献立から外れます。
-          </p>
+          <div className="mt-4" />
+          <SectionTitle
+            icon="💭"
+            title="候補"
+            count={candidates.length}
+            hint="→確定 ←削除"
+          />
+          {candidates.length === 0 ? (
+            <Empty text="候補はありません（レシピ一覧で左スワイプ／＋で追加）" />
+          ) : (
+            <div className="space-y-1">
+              {candidates.map((r) => (
+                <SwipeRow
+                  key={r.id}
+                  right={ACT_CONFIRM}
+                  left={ACT_DELETE}
+                  onSwipeRight={() => confirm(r)}
+                  onSwipeLeft={() => removeFromMenu(r)}
+                >
+                  <MenuLine row={r} servings={servings} />
+                </SwipeRow>
+              ))}
+            </div>
+          )}
         </div>
+      )}
+
+      {/* 買い物リストに追加の確認画面（全画面） */}
+      {showAdd && (
+        <ShoppingAddSheet
+          recipes={confirmed.map((r) => ({ id: r.id, dish_name: r.dish_name, servings: r.servings }))}
+          servings={servings}
+          userId={session.user.id}
+          onClose={() => setShowAdd(false)}
+          onAdded={(count) => {
+            setShowAdd(false)
+            setToast({
+              message: `${count}件を買い物リストに追加しました`,
+              actionLabel: '見る',
+              onAction: () => {
+                setToast(null)
+                navigate('/shopping')
+              },
+            })
+          }}
+        />
       )}
 
       {/* 操作のあとに出る「元に戻す」メッセージ */}
@@ -320,8 +326,8 @@ export default function MenuPage() {
         >
           <div className="pointer-events-auto flex max-w-md items-center gap-3 rounded-xl bg-gray-900 px-4 py-2.5 text-sm text-white shadow-lg">
             <span className="min-w-0 flex-1 truncate">{toast.message}</span>
-            <button onClick={toast.undo} className="shrink-0 font-bold text-amber-300">
-              元に戻す
+            <button onClick={toast.onAction} className="shrink-0 font-bold text-amber-300">
+              {toast.actionLabel}
             </button>
           </div>
         </div>
@@ -334,113 +340,60 @@ function SectionTitle({
   icon,
   title,
   count,
-  sub,
+  hint,
+  trailing,
 }: {
   icon: string
   title: string
   count: number
-  sub: string
+  hint: string
+  trailing?: React.ReactNode // 右端に置く部品（人数切替など）
 }) {
   return (
-    <div className="mb-2 flex items-baseline gap-2 px-1">
-      <h2 className="text-base font-bold text-gray-900">
+    <div className="mb-1 flex items-center gap-1.5 px-1">
+      <h2 className="shrink-0 text-sm font-bold text-gray-900">
         {icon} {title}
       </h2>
-      <span className="rounded-full bg-gray-200 px-2 py-0.5 text-xs font-semibold text-gray-600">{count}</span>
-      <span className="text-xs text-gray-400">{sub}</span>
+      <span className="shrink-0 rounded-full bg-gray-200 px-1.5 text-[11px] font-semibold text-gray-600">{count}</span>
+      <span className="ml-auto min-w-0 truncate text-[10px] text-gray-400">{hint}</span>
+      {trailing}
     </div>
   )
 }
 
 function Empty({ text }: { text: string }) {
   return (
-    <p className="rounded-xl border border-dashed border-gray-300 bg-white px-4 py-6 text-center text-xs leading-relaxed text-gray-400">
+    <p className="rounded-lg border border-dashed border-gray-300 bg-white px-3 py-3 text-center text-[11px] text-gray-400">
       {text}
     </p>
   )
 }
 
-// ---------- 献立カード（上：レシピの情報／下：操作ボタン） ----------
-function MenuCard({
-  row: r,
-  imageUrl,
-  busy,
-  children,
-}: {
-  row: MenuRow
-  imageUrl?: string
-  busy: boolean
-  children: React.ReactNode
-}) {
-  const genre = genreOf(r)
+// ---------- 献立の1行（コンパクト：料理名＋引用元の2段／右に人数ぶんのカロリー・費用） ----------
+function MenuLine({ row: r, servings }: { row: MenuRow; servings: number }) {
+  const kcal = r.kcal != null ? r.kcal * servings : null
+  const price = r.price != null ? r.price * servings : null
   return (
-    <div className={`rounded-xl bg-white shadow-sm ${busy ? 'opacity-60' : ''}`}>
-      <Link to={`/recipes/${r.id}`} className="flex items-center px-4 py-3 active:opacity-70">
-        {/* 左：①ジャンル＋サブカテゴリ ②料理名 ③引用元 */}
-        <div className="min-w-0 flex-1 text-left">
-          <div className="flex items-center gap-1.5">
-            <span className={`shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold ${GENRE_COLOR[genre]}`}>
-              {genre}
-            </span>
-            {r.category && (
-              <span className="truncate rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">
-                {r.category}
-              </span>
-            )}
-          </div>
-          <div className="mt-1 truncate font-medium text-gray-800">{r.dish_name}</div>
-          {r.source_name && <div className="mt-0.5 truncate text-xs text-gray-400">{r.source_name}</div>}
-        </div>
-
-        {/* 中央：サムネ（写真があるときだけ） */}
-        {imageUrl && (
-          <div className="mx-2 h-11 w-11 shrink-0 overflow-hidden rounded-lg border border-gray-200 bg-gray-100">
-            <img src={imageUrl} alt={r.dish_name} loading="lazy" className="h-full w-full object-cover" />
-          </div>
-        )}
-
-        {/* 右：1人前の値 */}
-        <div className="ml-2 shrink-0 whitespace-nowrap text-right">
-          <div className="flex items-baseline justify-end gap-3 text-sm font-semibold text-gray-700">
-            <span>{fmtVal(r.kcal, 'kcal')}</span>
-            <span>{fmtVal(r.price, '円')}</span>
-          </div>
-          <div className="mt-0.5 text-[10px] text-gray-400">
-            （1人前, ⏱ {r.cooking_time_minutes != null ? `${r.cooking_time_minutes}分` : '―'}）
-          </div>
-          {r.unresolved > 0 && <div className="text-[10px] text-amber-600">※未計算あり</div>}
-        </div>
-      </Link>
-
-      <div className="flex gap-2 border-t border-gray-100 px-3 py-2">{children}</div>
-    </div>
-  )
-}
-
-function ActionButton({
-  kind,
-  onClick,
-  disabled,
-  children,
-}: {
-  kind?: 'primary' | 'danger'
-  onClick: () => void
-  disabled: boolean
-  children: React.ReactNode
-}) {
-  const style =
-    kind === 'primary'
-      ? 'flex-[1.4] bg-amber-500 text-white'
-      : kind === 'danger'
-        ? 'flex-1 border border-red-200 bg-white text-red-500'
-        : 'flex-1 border border-gray-300 bg-white text-gray-600'
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={`min-w-0 whitespace-nowrap rounded-lg px-2 py-2 text-xs font-bold transition active:opacity-70 disabled:opacity-50 ${style}`}
+    <Link
+      to={`/recipes/${r.id}`}
+      draggable={false}
+      className="flex items-center gap-2 px-3 py-1.5 active:opacity-70"
     >
-      {children}
-    </button>
+      {/* 左：①料理名 ②引用元（左揃え。長いときは省略） */}
+      <div className="min-w-0 flex-1 text-left">
+        <div className="truncate text-sm font-medium leading-tight text-gray-800">
+          {r.dish_name}
+          {r.unresolved > 0 && <span className="ml-1 text-[10px] font-normal text-amber-600">※</span>}
+        </div>
+        {r.source_name && (
+          <div className="truncate text-[11px] leading-tight text-gray-400">{r.source_name}</div>
+        )}
+      </div>
+
+      {/* 右：人数ぶんのカロリー・費用 */}
+      <span className="shrink-0 whitespace-nowrap text-xs font-semibold text-gray-700">
+        {fmtVal(kcal, 'kcal')}　{fmtVal(price, '円')}
+      </span>
+    </Link>
   )
 }

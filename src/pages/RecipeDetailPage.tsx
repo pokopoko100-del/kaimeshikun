@@ -3,8 +3,10 @@
 // 今回の変更：
 //  ・「作る予定」ボタンを「献立候補」に変更。状態は 未追加／候補／確定 の3つを表示
 //  ・追加は「候補」から。外すときは確定も解除（確定・作ったは献立画面で行う）
+//  ・人数を変えられるようにした（「－ 2人前 ＋」。レシピ一覧・献立と共通の設定）。
+//    カロリー・費用・栄養素は選んだ人数ぶん、材料の分量も人数に合わせて自動で増減
 // これまでの内容：
-//  ・カロリー／費用／栄養素は recipe_nutrition ビュー（材料マスタから計算）から表示（1人前あたり＋合計）
+//  ・カロリー／費用／栄養素は recipe_nutrition ビュー（材料マスタから計算）から表示
 //  ・栄養素（たんぱく質・ビタミン・ミネラルなど）をタップで開閉
 //  ・計算できていない材料には「未計算」マーク
 //  ・分量は「大さじ3」のように、大さじ・小さじは単位を先頭に表示
@@ -16,6 +18,8 @@ import type { Ingredient, Recipe, Step } from '../types/recipe'
 import { useRecipeImage } from '../lib/useRecipeImage'
 import { NUTRIENT_INFO_LIST } from '../data/nutrientInfo'
 import type { NutrientInfo } from '../data/nutrientInfo'
+import ServingsStepper from '../components/ServingsStepper'
+import { useServings } from '../lib/useServings'
 
 // 材料 ＋ 紐付いたマスタの単位情報（未計算の判定に使う）
 type IngredientRow = Ingredient & {
@@ -62,6 +66,16 @@ function formatAmount(quantity: string | null, unit: string | null): string {
   return `${q}${u}`
 }
 
+// 人数に合わせて分量を増減する（"1/2" "2" などの数値だけ。「適量」などはそのまま）
+function scaleQuantity(quantity: string | null, factor: number): string | null {
+  if (quantity == null || factor === 1) return quantity
+  const n = parseQty(quantity)
+  if (n == null) return quantity
+  const v = n * factor
+  const rounded = v >= 100 ? Math.round(v) : v >= 10 ? Math.round(v * 10) / 10 : Math.round(v * 100) / 100
+  return String(rounded)
+}
+
 function roundSmart(value: number): number {
   const abs = Math.abs(value)
   if (abs === 0) return 0
@@ -79,6 +93,12 @@ function fmtVal(value: number | null, unit: string): string {
 function nv(row: NutritionRow | null, col: string): number | null {
   const v = row?.[col]
   return typeof v === 'number' ? v : null
+}
+
+// 栄養素（1人前あたり）を、選んだ人数ぶんにして取り出す
+function nvPer(row: NutritionRow | null, col: string, servings: number): number | null {
+  const v = nv(row, col)
+  return v == null ? null : v * servings
 }
 
 // 材料マスタの列名 → ビューの列名（xxx_per_100g → xxx_per_serving）
@@ -111,6 +131,7 @@ export default function RecipeDetailPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [togglingPlanned, setTogglingPlanned] = useState(false)
   const [showNutrients, setShowNutrients] = useState(false)
+  const [servings, setServings] = useServings() // 何人前で表示するか（共通設定）
 
   const imageUrl = useRecipeImage(recipe?.image_path ?? null)
 
@@ -240,11 +261,12 @@ export default function RecipeDetailPage() {
     )
   }
 
-  // 1人前あたり（ビューの値）と合計
+  // ビューの値は「1人前あたり」。選んだ人数ぶんに掛けて表示する
   const kcalPer = nv(nutrition, 'calorie_per_serving')
   const costPer = nv(nutrition, 'price_per_serving')
-  const totalKcal = kcalPer != null ? Math.round(kcalPer * recipe.servings) : null
-  const totalCost = costPer != null ? Math.round(costPer * recipe.servings) : null
+  const kcalN = kcalPer != null ? kcalPer * servings : null
+  const costN = costPer != null ? costPer * servings : null
+  const factor = servings / recipe.servings // 材料の分量を増減する倍率
   const unresolvedCount = unresolvedSet.size
 
   // 献立の状態：未追加／候補／確定
@@ -307,24 +329,26 @@ export default function RecipeDetailPage() {
           </p>
         )}
 
-        {/* カロリー・費用（材料マスタから計算した1人前あたり） */}
-        <div className="grid grid-cols-2 gap-3 mt-4">
+        {/* 人数の切替（カロリー・費用・栄養素・材料の分量に反映） */}
+        <div className="mt-4 flex items-center justify-between">
+          <span className="text-sm font-semibold text-gray-800">何人前で見る？</span>
+          <ServingsStepper value={servings} onChange={setServings} />
+        </div>
+
+        {/* カロリー・費用（材料マスタから計算。選んだ人数ぶん） */}
+        <div className="grid grid-cols-2 gap-3 mt-3">
           <div className="bg-white rounded-xl shadow-sm p-3 text-center">
-            <p className="text-xs text-gray-400">カロリー(1人前)</p>
-            <p className="text-lg font-semibold text-gray-800">{fmtVal(kcalPer, 'kcal')}</p>
-            {totalKcal != null && (
-              <p className="text-xs text-gray-400">
-                合計 約{totalKcal}kcal({recipe.servings}人前)
-              </p>
+            <p className="text-xs text-gray-400">カロリー({servings}人前)</p>
+            <p className="text-lg font-semibold text-gray-800">{fmtVal(kcalN, 'kcal')}</p>
+            {servings !== 1 && kcalPer != null && (
+              <p className="text-xs text-gray-400">1人前 {fmtVal(kcalPer, 'kcal')}</p>
             )}
           </div>
           <div className="bg-white rounded-xl shadow-sm p-3 text-center">
-            <p className="text-xs text-gray-400">費用(1人前)</p>
-            <p className="text-lg font-semibold text-gray-800">{fmtVal(costPer, '円')}</p>
-            {totalCost != null && (
-              <p className="text-xs text-gray-400">
-                合計 約{totalCost}円({recipe.servings}人前)
-              </p>
+            <p className="text-xs text-gray-400">費用({servings}人前)</p>
+            <p className="text-lg font-semibold text-gray-800">{fmtVal(costN, '円')}</p>
+            {servings !== 1 && costPer != null && (
+              <p className="text-xs text-gray-400">1人前 {fmtVal(costPer, '円')}</p>
             )}
           </div>
         </div>
@@ -350,7 +374,7 @@ export default function RecipeDetailPage() {
             onClick={() => setShowNutrients((v) => !v)}
             className="flex w-full items-center justify-between rounded-xl bg-white px-4 py-3 shadow-sm"
           >
-            <span className="font-semibold text-gray-800">栄養素（1人前あたり）</span>
+            <span className="font-semibold text-gray-800">栄養素（{servings}人前）</span>
             <span className="text-sm text-gray-400">{showNutrients ? '閉じる ▲' : '開く ▼'}</span>
           </button>
 
@@ -366,7 +390,7 @@ export default function RecipeDetailPage() {
                       key={String(n.key)}
                       label={n.label}
                       indent={INDENT_KEYS.includes(String(n.key))}
-                      value={fmtVal(nv(nutrition, servingCol(String(n.key))), n.unit)}
+                      value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
                     />
                   ))}
                   <div className="mb-1 mt-3 border-t border-gray-100 pt-2 text-xs font-semibold text-gray-500">
@@ -376,7 +400,7 @@ export default function RecipeDetailPage() {
                     <NutrientLine
                       key={String(n.key)}
                       label={n.label}
-                      value={fmtVal(nv(nutrition, servingCol(String(n.key))), n.unit)}
+                      value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
                     />
                   ))}
                   <p className="mt-3 text-[11px] text-gray-400">
@@ -390,7 +414,12 @@ export default function RecipeDetailPage() {
 
         {/* 材料 */}
         <section className="mt-6">
-          <h2 className="font-semibold text-gray-800 mb-2">材料({recipe.servings}人前)</h2>
+          <h2 className="font-semibold text-gray-800 mb-2">
+            材料({servings}人前)
+            {servings !== recipe.servings && (
+              <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
+            )}
+          </h2>
           {ingredients.length === 0 ? (
             <p className="text-sm text-gray-400">材料情報はありません。</p>
           ) : (
@@ -406,7 +435,7 @@ export default function RecipeDetailPage() {
                       </span>
                     )}
                   </span>
-                  <span className="text-gray-500">{formatAmount(ing.quantity, ing.unit)}</span>
+                  <span className="text-gray-500">{formatAmount(scaleQuantity(ing.quantity, factor), ing.unit)}</span>
                 </li>
               ))}
             </ul>

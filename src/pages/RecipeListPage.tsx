@@ -4,16 +4,21 @@
 //  ・検索ボックスの右横に、写真／リスト切替
 //  ・ジャンル（すべて・和食・洋食・中華・エスニック・その他）を1行、サブカテゴリ（6分類）を1行
 //  ・リスト表示：カードを左へスワイプ →「献立候補」に追加／献立から外す（離すと確定）
+//  ・値は、右上の人数（共通設定）あたりで表示。「－ 2人前 ＋」で変更（詳細・献立画面と共通）
 //  ・写真表示：サムネ右上の＋ボタンで 候補に追加／外す
 //  ・追加／解除のあとに「元に戻す」付きのメッセージを数秒表示
 //  ・カードのバッジ：「候補」「確定」で献立の状態を表示（確定・作ったは献立画面で行う）
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useOutletContext } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../supabaseClient'
 import type { Recipe as RecipeBase } from '../types/recipe'
 import type { IngredientMaster } from '../types/ingredient'
 import { NUTRIENT_INFO_LIST, getNutrientInfo } from '../data/nutrientInfo'
+import SwipeRow from '../components/SwipeRow'
+import type { SwipeAction } from '../components/SwipeRow'
+import ServingsStepper from '../components/ServingsStepper'
+import { useServings } from '../lib/useServings'
 
 // 一覧で使う項目だけ抜き出す
 type Recipe = Pick<
@@ -158,6 +163,12 @@ function fmtVal(value: number | null, unit: string): string {
   return `${roundSmart(value)}${unit}`
 }
 
+// ビューの値は「1人前あたり」。表示する人数ぶんに掛ける
+function nvN(r: RecipeRow, col: string, servings: number): number | null {
+  const v = nv(r, col)
+  return v == null ? null : v * servings
+}
+
 // 献立の状態：候補／確定／なし
 function planLabel(r: Pick<Recipe, 'is_planned' | 'plan_confirmed'>): '確定' | '候補' | null {
   if (!r.is_planned) return null
@@ -175,6 +186,7 @@ export default function RecipeListPage() {
   const [error, setError] = useState<string | null>(null)
   const [nutritionNotice, setNutritionNotice] = useState<string | null>(null)
   const [toast, setToast] = useState<Toast | null>(null)
+  const [servings, setServings] = useServings() // 何人前で表示するか（共通設定）
 
   const [keyword, setKeyword] = useState('')
   const [genreFilter, setGenreFilter] = useState<GenreFilter>('すべて')
@@ -467,15 +479,13 @@ export default function RecipeListPage() {
           </select>
         </div>
 
-        {/* 件数（左）＋ 操作のヒント ＋「1人前あたり」の固定表示（右） */}
+        {/* 件数（左）＋ 操作のヒント ＋ 人数切替（右） */}
         <div className="mt-2 flex items-center justify-between gap-2 text-xs text-gray-500">
           <span className="shrink-0">{loading ? '読み込み中…' : `${sorted.length}件`}</span>
           <span className="min-w-0 truncate text-[10px] text-gray-400">
             {viewMode === 'list' ? '← 左スワイプで献立候補に追加' : '右上の＋で献立候補に追加'}
           </span>
-          <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-600">
-            1人前あたり
-          </span>
+          <ServingsStepper value={servings} onChange={setServings} />
         </div>
       </header>
 
@@ -495,6 +505,7 @@ export default function RecipeListPage() {
                   recipe={r}
                   imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
                   sortNutrient={sortNutrientInfo}
+                  servings={servings}
                   onTogglePlanned={() => togglePlanned(r)}
                 />
               ))}
@@ -506,11 +517,16 @@ export default function RecipeListPage() {
                 <div key={i} className="h-16 animate-pulse rounded-xl bg-gray-200" />
               ))
             : sorted.map((r) => (
-                <SwipeRow key={r.id} planned={r.is_planned} onCommit={() => togglePlanned(r)}>
+                <SwipeRow
+                  key={r.id}
+                  left={r.is_planned ? SWIPE_REMOVE : SWIPE_ADD}
+                  onSwipeLeft={() => togglePlanned(r)}
+                >
                   <ListCard
                     recipe={r}
                     imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
                     sortNutrient={sortNutrientInfo}
+                    servings={servings}
                   />
                 </SwipeRow>
               ))}
@@ -556,137 +572,27 @@ function PlanBadge({ recipe }: { recipe: Pick<Recipe, 'is_planned' | 'plan_confi
   )
 }
 
-// ---------- スワイプ行（左へスワイプ → 離すと「献立候補に追加」／「献立から外す」） ----------
-const ACTION_W = 104 // 右側に現れる操作エリアの幅(px)
-const COMMIT_W = 72 // これ以上引いて離すと確定(px)
-
-function SwipeRow({
-  planned,
-  onCommit,
-  children,
-}: {
-  planned: boolean
-  onCommit: () => void
-  children: React.ReactNode
-}) {
-  const [dx, setDx] = useState(0)
-  const [dragging, setDragging] = useState(false)
-  const startRef = useRef<{ x: number; y: number } | null>(null)
-  const axisRef = useRef<'h' | 'v' | null>(null)
-  const movedRef = useRef(false)
-
-  const reset = () => {
-    startRef.current = null
-    axisRef.current = null
-    setDragging(false)
-    setDx(0)
-  }
-
-  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.pointerType === 'mouse' && e.button !== 0) return
-    startRef.current = { x: e.clientX, y: e.clientY }
-    axisRef.current = null
-    movedRef.current = false
-  }
-
-  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const s = startRef.current
-    if (!s) return
-    const mx = e.clientX - s.x
-    const my = e.clientY - s.y
-
-    // 向きが決まるまで様子を見る。縦のほうが大きければ、スワイプとは扱わない（縦スクロール優先）
-    if (axisRef.current === null) {
-      if (Math.abs(mx) < 8 && Math.abs(my) < 8) return
-      if (mx < 0 && Math.abs(mx) > Math.abs(my) * 1.5) {
-        axisRef.current = 'h'
-        setDragging(true)
-        e.currentTarget.setPointerCapture(e.pointerId)
-      } else {
-        axisRef.current = 'v'
-        startRef.current = null
-        return
-      }
-    }
-
-    if (axisRef.current === 'h') {
-      movedRef.current = true
-      setDx(Math.max(-ACTION_W, Math.min(0, mx)))
-    }
-  }
-
-  const onPointerUp = () => {
-    const committed = axisRef.current === 'h' && dx <= -COMMIT_W
-    reset()
-    if (committed) onCommit()
-  }
-
-  // スワイプしたあとの「指を離した瞬間のタップ」で詳細画面へ飛ばないようにする
-  const onClickCapture = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (movedRef.current) {
-      e.preventDefault()
-      e.stopPropagation()
-      movedRef.current = false
-    }
-  }
-
-  const reached = dx <= -COMMIT_W
-  const label = planned
-    ? reached
-      ? '離して外す'
-      : '献立から外す'
-    : reached
-      ? '離して追加'
-      : '＋ 献立候補'
-
-  return (
-    <div className="relative select-none overflow-hidden rounded-xl">
-      {/* 背面：スワイプで現れる操作エリア */}
-      <div
-        className={`absolute inset-y-0 right-0 flex items-center justify-center px-1 text-center text-sm font-bold leading-tight text-white ${
-          planned ? 'bg-gray-500' : 'bg-orange-500'
-        }`}
-        style={{ width: ACTION_W }}
-      >
-        {label}
-      </div>
-
-      {/* 前面：カード本体（縦スクロールはブラウザに任せ、横の動きだけ受け取る） */}
-      <div
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={reset}
-        onClickCapture={onClickCapture}
-        onDragStart={(e) => e.preventDefault()}
-        className="relative bg-white"
-        style={{
-          transform: `translateX(${dx}px)`,
-          transition: dragging ? 'none' : 'transform 0.2s ease-out',
-          touchAction: 'pan-y',
-        }}
-      >
-        {children}
-      </div>
-    </div>
-  )
-}
+// ---------- スワイプ時の表示（左スワイプ：献立候補に追加／献立から外す） ----------
+const SWIPE_ADD: SwipeAction = { label: '＋ 献立候補', readyLabel: '離して追加', className: 'bg-orange-500' }
+const SWIPE_REMOVE: SwipeAction = { label: '献立から外す', readyLabel: '離して外す', className: 'bg-gray-500' }
 
 // ---------- 写真表示（YouTube風2列） ----------
 function PhotoCard({
   recipe: r,
   imageUrl,
   sortNutrient,
+  servings,
   onTogglePlanned,
 }: {
   recipe: RecipeRow
   imageUrl?: string
   sortNutrient: SortNutrientInfo
+  servings: number
   onTogglePlanned: () => void
 }) {
   const title = r.source_name ? `${r.dish_name} / ${r.source_name}` : r.dish_name
-  const kcal = nv(r, 'calorie_per_serving')
-  const price = nv(r, 'price_per_serving')
+  const kcal = nvN(r, 'calorie_per_serving', servings)
+  const price = nvN(r, 'price_per_serving', servings)
   const unresolved = unresolvedCount(r)
   const label = planLabel(r)
 
@@ -717,7 +623,7 @@ function PhotoCard({
         <p className="mt-1.5 line-clamp-2 text-[13px] font-bold leading-snug text-gray-900">{title}</p>
         <p className="mt-0.5 text-[11px] text-gray-500">
           {sortNutrient
-            ? `${sortNutrient.label} ${fmtVal(nv(r, sortNutrient.col), sortNutrient.unit)}`
+            ? `${sortNutrient.label} ${fmtVal(nvN(r, sortNutrient.col, servings), sortNutrient.unit)}`
             : fmtVal(kcal, 'kcal')}
           {' ・ '}
           {fmtVal(price, '円')}
@@ -746,14 +652,16 @@ function ListCard({
   recipe: r,
   imageUrl,
   sortNutrient,
+  servings,
 }: {
   recipe: RecipeRow
   imageUrl?: string
   sortNutrient: SortNutrientInfo
+  servings: number
 }) {
   const genre = genreOf(r)
-  const kcal = nv(r, 'calorie_per_serving')
-  const price = nv(r, 'price_per_serving')
+  const kcal = nvN(r, 'calorie_per_serving', servings)
+  const price = nvN(r, 'price_per_serving', servings)
   const unresolved = unresolvedCount(r)
 
   return (
@@ -784,7 +692,7 @@ function ListCard({
           <div className="flex items-baseline justify-end gap-3 text-sm font-semibold">
             {sortNutrient ? (
               <span className="text-amber-600">
-                {sortNutrient.label} {fmtVal(nv(r, sortNutrient.col), sortNutrient.unit)}
+                {sortNutrient.label} {fmtVal(nvN(r, sortNutrient.col, servings), sortNutrient.unit)}
               </span>
             ) : (
               <span className="text-gray-700">{fmtVal(kcal, 'kcal')}</span>
