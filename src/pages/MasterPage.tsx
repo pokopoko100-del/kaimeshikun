@@ -49,21 +49,21 @@ function isInSeason(months: number[] | null, now: Date = new Date()): boolean {
 // 旬の月の配列を「11月〜2月」のような表示用文字列に変換（年またぎにも対応）
 function formatSeasonMonths(months: number[] | null): string {
   if (!months || months.length === 0) return '';
-  const sorted = [...months].sort((a, b) => a - b);
+  const sorted = [...new Set(months)].sort((a, b) => a - b);
 
-  // 年またぎ（12→1のつながり）を考慮して、12月始まりに回転させる
-  const rotated: number[] = [...sorted];
-  while (rotated.length > 1 && rotated[rotated.length - 1] === 12 && rotated[0] === 1) {
-    rotated.unshift(rotated.pop()!);
-    if (rotated[0] !== 12) break;
+  // 年またぎ対応：12月と1月の両方がある場合、「前の月が含まれない月」から始まるように並べ替える
+  let ordered = sorted;
+  if (sorted.includes(12) && sorted.includes(1) && sorted.length < 12) {
+    const startIdx = sorted.findIndex((m) => !sorted.includes(m === 1 ? 12 : m - 1));
+    ordered = [...sorted.slice(startIdx), ...sorted.slice(0, startIdx)];
   }
 
   const ranges: string[] = [];
-  let start = rotated[0];
-  let prev = rotated[0];
-  for (let i = 1; i <= rotated.length; i++) {
-    const cur = rotated[i];
-    const isConsecutive = cur !== undefined && (cur === prev + 1 || (prev === 12 && cur === 1));
+  let start = ordered[0];
+  let prev = ordered[0];
+  for (let i = 1; i <= ordered.length; i++) {
+    const cur = ordered[i];
+    const isConsecutive = cur !== undefined && cur === (prev % 12) + 1;
     if (!isConsecutive) {
       ranges.push(start === prev ? `${start}月` : `${start}月〜${prev}月`);
       start = cur;
