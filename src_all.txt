@@ -406,7 +406,7 @@ export default function LoginPage() {
     </div>
   )
 }..
-..
+echo ..
 ===== src\data\nutrientInfo.ts =====
 echo ..
 
@@ -624,7 +624,7 @@ export function getNutrientInfo(key: keyof IngredientMaster) {
 }
 
 ..
-..
+echo ..
 ===== src\lib\supabaseStorage.ts =====
 echo ..
 // ファイル: src/lib/supabaseStorage.ts
@@ -650,7 +650,7 @@ export async function getRecipeImageUrl(imagePath: string | null): Promise<strin
 
   return data.signedUrl
 }..
-..
+echo ..
 ===== src\lib\useRecipeImage.ts =====
 echo ..
 // ファイル: src/lib/useRecipeImage.ts
@@ -681,9 +681,16 @@ export function useRecipeImage(imagePath: string | null) {
 
   return url
 }..
-..
+echo ..
 ===== src\pages\MasterPage.tsx =====
 echo ..
+// src/pages/MasterPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の修正：
+//  ① 一覧の左側を「分類＋旬」→「材料名」→「銘柄」の3段・左揃えに変更
+//  ② 「100gあたり」を上部に固定表示し、各レコードの「/ 100g」を削除
+//  ③ 右側の数値を「117kcal  40円」（大きめ）＋「（大さじ1：21kcal, 7.2円）」（小さめ）の2段表示に変更
+//  ④ いつもの商品の画像を登録（詳細を開く→画像を登録）。一覧では小さく表示し、タップで拡大
+//  ⑤ チップを2段に変更（1段目：すべて・旬のみ／2段目：カテゴリ）
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../supabaseClient';
 import type { IngredientCategory, IngredientMaster } from '../types/ingredient';
@@ -711,13 +718,21 @@ const CATEGORY_COLOR: Record<IngredientCategory, string> = {
   日用品: 'bg-purple-100 text-purple-700',
 };
 
+// いつもの商品の画像は、レシピ写真と同じ非公開バケットに保存する
+// （既存のRLSポリシー：パスの先頭が household_id のフォルダ）
+const BUCKET = 'recipe-images';
+
 // ソートの選択肢。先頭は「並び替えなし（カテゴリ順）」
 // プルダウンの表示文字列は栄養素名そのまま（「○○が多い順」のような接尾語は付けない）
 type SortKey = 'default' | keyof IngredientMaster;
+
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: 'default', label: 'カテゴリ順（既定）' },
   ...NUTRIENT_INFO_LIST.map((n) => ({ key: n.key as SortKey, label: n.label })),
 ];
+
+// 拡大表示中の画像
+type Lightbox = { url: string; title: string };
 
 // 数値を「値がある時だけ」表示するための小さなヘルパー
 function fmt(value: number | null, unit: string) {
@@ -735,21 +750,19 @@ function isInSeason(months: number[] | null, now: Date = new Date()): boolean {
 // 旬の月の配列を「11月〜2月」のような表示用文字列に変換（年またぎにも対応）
 function formatSeasonMonths(months: number[] | null): string {
   if (!months || months.length === 0) return '';
-  const sorted = [...months].sort((a, b) => a - b);
-
-  // 年またぎ（12→1のつながり）を考慮して、12月始まりに回転させる
-  const rotated: number[] = [...sorted];
-  while (rotated.length > 1 && rotated[rotated.length - 1] === 12 && rotated[0] === 1) {
-    rotated.unshift(rotated.pop()!);
-    if (rotated[0] !== 12) break;
+  const sorted = [...new Set(months)].sort((a, b) => a - b);
+  // 年またぎ対応：12月と1月の両方がある場合、「前の月が含まれない月」から始まるように並べ替える
+  let ordered = sorted;
+  if (sorted.includes(12) && sorted.includes(1) && sorted.length < 12) {
+    const startIdx = sorted.findIndex((m) => !sorted.includes(m === 1 ? 12 : m - 1));
+    ordered = [...sorted.slice(startIdx), ...sorted.slice(0, startIdx)];
   }
-
   const ranges: string[] = [];
-  let start = rotated[0];
-  let prev = rotated[0];
-  for (let i = 1; i <= rotated.length; i++) {
-    const cur = rotated[i];
-    const isConsecutive = cur !== undefined && (cur === prev + 1 || (prev === 12 && cur === 1));
+  let start = ordered[0];
+  let prev = ordered[0];
+  for (let i = 1; i <= ordered.length; i++) {
+    const cur = ordered[i];
+    const isConsecutive = cur !== undefined && cur === (prev % 12) + 1;
     if (!isConsecutive) {
       ranges.push(start === prev ? `${start}月` : `${start}月〜${prev}月`);
       start = cur;
@@ -787,6 +800,53 @@ function fmtPerUnit(value: number | null, unitWeightG: number | null, unit: stri
   return `${roundSmart(per)}${unit}`;
 }
 
+// ---------- 画像まわりのヘルパー ----------
+
+function loadImage(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('画像を読み込めませんでした'));
+    };
+    img.src = url;
+  });
+}
+
+// 端末側で長辺1024px・JPEG品質80%に圧縮してからアップロードする
+async function compressImage(file: File, maxEdge = 1024, quality = 0.8): Promise<Blob> {
+  const img = await loadImage(file);
+  const scale = Math.min(1, maxEdge / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.round(img.naturalWidth * scale);
+  const h = Math.round(img.naturalHeight * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('画像の変換に失敗しました');
+  ctx.drawImage(img, 0, 0, w, h);
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error('画像の変換に失敗しました'))),
+      'image/jpeg',
+      quality,
+    );
+  });
+}
+
+function errorText(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === 'object' && e !== null && 'message' in e) {
+    return String((e as { message: unknown }).message);
+  }
+  return '不明なエラー';
+}
+
 export default function MasterPage() {
   const [items, setItems] = useState<IngredientMaster[]>([]);
   const [loading, setLoading] = useState(true);
@@ -797,6 +857,10 @@ export default function MasterPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('default');
   const [infoModalKey, setInfoModalKey] = useState<keyof IngredientMaster | null>(null);
+  // いつもの商品の画像：保存パス → 署名付きURL
+  const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
+  const [lightbox, setLightbox] = useState<Lightbox | null>(null);
+  const [uploadingId, setUploadingId] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchIngredients = async () => {
@@ -811,12 +875,27 @@ export default function MasterPage() {
       if (error) {
         setErrorMessage('材料マスタの読み込みに失敗しました。');
         console.error(error);
-      } else if (data) {
-        setItems(data as IngredientMaster[]);
+        setLoading(false);
+        return;
       }
-      setLoading(false);
-    };
 
+      const list = (data ?? []) as IngredientMaster[];
+      setItems(list);
+      setLoading(false);
+
+      // 非公開バケットなので、画像がある材料の署名付きURLをまとめて発行（1時間有効）
+      const paths = list
+        .map((i) => i.usual_product_image_path)
+        .filter((p): p is string => !!p);
+      if (paths.length > 0) {
+        const { data: signed } = await supabase.storage.from(BUCKET).createSignedUrls(paths, 3600);
+        const map: Record<string, string> = {};
+        signed?.forEach((s) => {
+          if (s.path && s.signedUrl) map[s.path] = s.signedUrl;
+        });
+        setImageUrls(map);
+      }
+    };
     fetchIngredients();
   }, []);
 
@@ -831,7 +910,6 @@ export default function MasterPage() {
       if (seasonOnly && !isInSeason(item.peak_season_months)) return false;
 
       if (!keyword) return true;
-
       const haystack = [item.ingredient_name, item.brand_name, item.usual_product_name]
         .filter(Boolean)
         .join(' ')
@@ -856,13 +934,86 @@ export default function MasterPage() {
     setExpandedId((prev) => (prev === id ? null : id));
   };
 
+  // 「すべて」：カテゴリも旬のみも解除（リセット）
+  const handleSelectAll = () => {
+    setSelectedCategory('すべて');
+    setSeasonOnly(false);
+  };
+
+  // いつもの商品の画像を登録（圧縮→Storageへアップロード→DBにパス保存→旧画像を削除）
+  const handleUploadImage = async (item: IngredientMaster, file: File) => {
+    setUploadingId(item.id);
+    try {
+      const blob = await compressImage(file);
+      const newPath = `${item.household_id}/usual-products/${item.id}-${Date.now()}.jpg`;
+
+      const { error: upError } = await supabase.storage
+        .from(BUCKET)
+        .upload(newPath, blob, { contentType: 'image/jpeg' });
+      if (upError) throw upError;
+
+      const { data: updated, error: dbError } = await supabase
+        .from('ingredient_master')
+        .update({ usual_product_image_path: newPath })
+        .eq('id', item.id)
+        .select('id');
+      if (dbError || !updated || updated.length === 0) {
+        await supabase.storage.from(BUCKET).remove([newPath]);
+        throw dbError ?? new Error('材料マスタを更新できませんでした（権限またはSQLを確認してください）');
+      }
+
+      // 旧画像があれば削除（失敗しても致命的ではない）
+      const oldPath = item.usual_product_image_path;
+      if (oldPath) await supabase.storage.from(BUCKET).remove([oldPath]);
+
+      const { data: signed } = await supabase.storage.from(BUCKET).createSignedUrl(newPath, 3600);
+      setItems((prev) =>
+        prev.map((i) => (i.id === item.id ? { ...i, usual_product_image_path: newPath } : i)),
+      );
+      if (signed?.signedUrl) {
+        setImageUrls((prev) => ({ ...prev, [newPath]: signed.signedUrl }));
+      }
+    } catch (e) {
+      console.error(e);
+      alert('画像の登録に失敗しました：' + errorText(e));
+    } finally {
+      setUploadingId(null);
+    }
+  };
+
+  const handleDeleteImage = async (item: IngredientMaster) => {
+    const path = item.usual_product_image_path;
+    if (!path) return;
+    if (!window.confirm('いつもの商品の画像を削除しますか？')) return;
+    setUploadingId(item.id);
+    try {
+      const { data: updated, error: dbError } = await supabase
+        .from('ingredient_master')
+        .update({ usual_product_image_path: null })
+        .eq('id', item.id)
+        .select('id');
+      if (dbError || !updated || updated.length === 0) {
+        throw dbError ?? new Error('材料マスタを更新できませんでした');
+      }
+      await supabase.storage.from(BUCKET).remove([path]);
+      setItems((prev) =>
+        prev.map((i) => (i.id === item.id ? { ...i, usual_product_image_path: null } : i)),
+      );
+    } catch (e) {
+      console.error(e);
+      alert('画像の削除に失敗しました：' + errorText(e));
+    } finally {
+      setUploadingId(null);
+    }
+  };
+
   const infoNutrient = infoModalKey ? getNutrientInfo(infoModalKey) : null;
   // 現在プルダウンで選んでいる栄養素（カテゴリ順の時はnull）
   const selectedSortNutrient = sortKey !== 'default' ? getNutrientInfo(sortKey as keyof IngredientMaster) : null;
 
   return (
     <div className="min-h-screen bg-gray-50 pb-20">
-      {/* 検索バー */}
+      {/* 上部固定エリア：検索・絞り込み・並び替え・件数 */}
       <div className="sticky top-0 z-10 bg-white px-4 pt-4 pb-3 shadow-sm">
         <input
           type="text"
@@ -872,9 +1023,31 @@ export default function MasterPage() {
           className="w-full rounded-full border border-gray-300 px-4 py-2 text-sm focus:border-amber-500 focus:outline-none"
         />
 
-        {/* カテゴリ絞り込みチップ（ギャラリー）＋ 旬のみチップ */}
-        <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
-          {(['すべて', ...CATEGORIES] as const).map((cat) => (
+        {/* 1段目：すべて・旬のみ */}
+        <div className="mt-3 flex gap-2">
+          <button
+            onClick={handleSelectAll}
+            className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition ${
+              selectedCategory === 'すべて' && !seasonOnly
+                ? 'bg-amber-500 text-white'
+                : 'bg-gray-100 text-gray-600'
+            }`}
+          >
+            すべて
+          </button>
+          <button
+            onClick={() => setSeasonOnly((prev) => !prev)}
+            className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition ${
+              seasonOnly ? 'bg-pink-500 text-white' : 'bg-pink-50 text-pink-600'
+            }`}
+          >
+            🌸 旬のみ
+          </button>
+        </div>
+
+        {/* 2段目：カテゴリ（横スクロール） */}
+        <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+          {CATEGORIES.map((cat) => (
             <button
               key={cat}
               onClick={() => setSelectedCategory(cat)}
@@ -887,15 +1060,6 @@ export default function MasterPage() {
               {cat}
             </button>
           ))}
-          {/* 旬の食材のみ表示するトグルチップ */}
-          <button
-            onClick={() => setSeasonOnly((prev) => !prev)}
-            className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition ${
-              seasonOnly ? 'bg-pink-500 text-white' : 'bg-pink-50 text-pink-600'
-            }`}
-          >
-            🌸 旬のみ
-          </button>
         </div>
 
         {/* ギャラリーとプルダウンの間：選択中の栄養素の働き・不足症状を常時表示 */}
@@ -928,11 +1092,14 @@ export default function MasterPage() {
             ))}
           </select>
         </div>
-      </div>
 
-      {/* 件数表示 */}
-      <div className="px-4 pt-3 text-xs text-gray-500">
-        {loading ? '読み込み中…' : `${filteredItems.length}件`}
+        {/* 件数（左）＋ 「100gあたり」の固定表示（右。各レコードの数値の真上に来る） */}
+        <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
+          <span>{loading ? '読み込み中…' : `${filteredItems.length}件`}</span>
+          <span className="rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-600">
+            100gあたり
+          </span>
+        </div>
       </div>
 
       {/* エラー表示 */}
@@ -966,21 +1133,43 @@ export default function MasterPage() {
               const pu = (value: number | null, unit: string) =>
                 showUnit ? fmtPerUnit(value, item.unit_weight_g, unit) : null;
 
+              // 一覧右側の「1単位あたり」小さい表示（例：大さじ1：21kcal, 7.2円）
+              const unitNutrientText = selectedSortNutrient
+                ? pu(sortedValue, selectedSortNutrient.unit)
+                : pu(item.calorie_per_100g, 'kcal');
+              const unitPriceText = pu(item.price_per_100g, '円');
+              const unitParts = [unitNutrientText, unitPriceText].filter(
+                (v): v is string => !!v,
+              );
+
+              // いつもの商品の画像（あれば）
+              const imagePath = item.usual_product_image_path;
+              const imageUrl = imagePath ? imageUrls[imagePath] : undefined;
+              const isUploading = uploadingId === item.id;
+              const lightboxTitle = item.usual_product_name ?? item.brand_name ?? item.ingredient_name;
+
               return (
                 <div key={item.id} className="rounded-xl bg-white shadow-sm">
-                  <button
+                  {/* カード本体（ボタンの中にボタンを入れないよう div + role="button"） */}
+                  <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => toggleExpand(item.id)}
-                    className="flex w-full items-center justify-between px-4 py-3 text-left"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleExpand(item.id);
+                      }
+                    }}
+                    className="flex w-full cursor-pointer items-center px-4 py-3 text-left"
                   >
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
+                    {/* 左：①分類＋旬 ②材料名 ③銘柄（すべて左揃え） */}
+                    <div className="min-w-0 flex-1 text-left">
+                      <div className="flex items-center gap-1.5">
                         <span
                           className={`rounded px-2 py-0.5 text-[10px] font-semibold ${CATEGORY_COLOR[item.category]}`}
                         >
                           {item.category}
-                        </span>
-                        <span className="truncate font-medium text-gray-800">
-                          {item.ingredient_name}
                         </span>
                         {isInSeason(item.peak_season_months) && (
                           <span className="shrink-0 rounded bg-pink-100 px-1.5 py-0.5 text-[10px] font-bold text-pink-600">
@@ -988,44 +1177,55 @@ export default function MasterPage() {
                           </span>
                         )}
                       </div>
+                      <div className="mt-1 truncate font-medium text-gray-800">
+                        {item.ingredient_name}
+                      </div>
                       {item.brand_name && (
                         <div className="mt-0.5 truncate text-xs text-gray-400">
                           {item.brand_name}
                         </div>
                       )}
                     </div>
-                    <div className="ml-3 shrink-0 text-right text-xs text-gray-500">
-                      {selectedSortNutrient ? (
-                        <div className="font-semibold text-amber-600">
-                          <div>
-                            {selectedSortNutrient.label} {fmt(sortedValue, selectedSortNutrient.unit)} / 100g
-                          </div>
-                          {pu(sortedValue, selectedSortNutrient.unit) && (
-                            <div className="font-normal text-amber-500">
-                              （{unitLabel}：{pu(sortedValue, selectedSortNutrient.unit)}）
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <div>
-                          <div>{fmt(item.calorie_per_100g, 'kcal')} / 100g</div>
-                          {pu(item.calorie_per_100g, 'kcal') && (
-                            <div className="text-gray-400">
-                              （{unitLabel}：{pu(item.calorie_per_100g, 'kcal')}）
-                            </div>
-                          )}
+
+                    {/* 中央：いつもの商品の画像（小さく表示。タップで拡大） */}
+                    {imageUrl && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setLightbox({ url: imageUrl, title: lightboxTitle });
+                        }}
+                        className="mx-2 h-11 w-11 shrink-0 overflow-hidden rounded-lg border border-gray-200 bg-gray-100"
+                        aria-label="画像を拡大"
+                      >
+                        <img
+                          src={imageUrl}
+                          alt={lightboxTitle}
+                          loading="lazy"
+                          className="h-full w-full object-cover"
+                        />
+                      </button>
+                    )}
+
+                    {/* 右：上段＝100gあたりの値（大きめ）／下段＝1単位あたり（小さめ・括弧書き） */}
+                    <div className="ml-2 shrink-0 whitespace-nowrap text-right">
+                      <div className="flex items-baseline justify-end gap-3 text-sm font-semibold">
+                        {selectedSortNutrient ? (
+                          <span className="text-amber-600">
+                            {selectedSortNutrient.label} {fmt(sortedValue, selectedSortNutrient.unit)}
+                          </span>
+                        ) : (
+                          <span className="text-gray-700">{fmt(item.calorie_per_100g, 'kcal')}</span>
+                        )}
+                        <span className="text-gray-700">{fmt(item.price_per_100g, '円')}</span>
+                      </div>
+                      {unitParts.length > 0 && (
+                        <div className="mt-0.5 text-[10px] text-gray-400">
+                          （{unitLabel}：{unitParts.join(', ')}）
                         </div>
                       )}
-                      <div className="mt-1">
-                        <div>¥{fmt(item.price_per_100g, '')} / 100g</div>
-                        {pu(item.price_per_100g, '') && (
-                          <div className="text-gray-400">
-                            （{unitLabel}：¥{pu(item.price_per_100g, '')}）
-                          </div>
-                        )}
-                      </div>
                     </div>
-                  </button>
+                  </div>
 
                   {/* 展開時：栄養価・単価の詳細 */}
                   {isExpanded && (
@@ -1049,6 +1249,57 @@ export default function MasterPage() {
                           ) : (
                             '通年（特になし）'
                           )}
+                        </div>
+                      </div>
+
+                      {/* いつもの商品の画像：登録・変更・削除 */}
+                      <div className="mb-2 flex items-center gap-3 rounded-lg bg-gray-50 p-2 text-xs text-gray-600">
+                        {imageUrl ? (
+                          <button
+                            type="button"
+                            onClick={() => setLightbox({ url: imageUrl, title: lightboxTitle })}
+                            className="h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-gray-200"
+                            aria-label="画像を拡大"
+                          >
+                            <img src={imageUrl} alt={lightboxTitle} className="h-full w-full object-cover" />
+                          </button>
+                        ) : (
+                          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-gray-200 text-xl">
+                            📷
+                          </div>
+                        )}
+                        <div className="flex flex-1 flex-col gap-1.5">
+                          <span className="font-semibold text-gray-500">いつもの商品の画像</span>
+                          <div className="flex items-center gap-2">
+                            <label
+                              className={`cursor-pointer rounded-full px-3 py-1 font-medium text-white ${
+                                isUploading ? 'bg-gray-400' : 'bg-amber-500'
+                              }`}
+                            >
+                              {isUploading ? 'アップロード中…' : imagePath ? '画像を変更' : '画像を登録'}
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                disabled={isUploading}
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  e.target.value = '';
+                                  if (file) handleUploadImage(item, file);
+                                }}
+                              />
+                            </label>
+                            {imagePath && (
+                              <button
+                                type="button"
+                                disabled={isUploading}
+                                onClick={() => handleDeleteImage(item)}
+                                className="rounded-full border border-red-300 px-3 py-1 font-medium text-red-500 disabled:opacity-50"
+                              >
+                                削除
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
 
@@ -1115,6 +1366,22 @@ export default function MasterPage() {
         )}
       </div>
 
+      {/* 画像の拡大表示（どこをタップしても閉じる） */}
+      {lightbox && (
+        <div
+          className="fixed inset-0 z-[60] flex flex-col items-center justify-center bg-black/80 p-4"
+          onClick={() => setLightbox(null)}
+        >
+          <img
+            src={lightbox.url}
+            alt={lightbox.title}
+            className="max-h-[75vh] max-w-full rounded-xl object-contain"
+          />
+          <p className="mt-3 text-sm font-semibold text-white">{lightbox.title}</p>
+          <p className="mt-1 text-xs text-white/60">タップで閉じる</p>
+        </div>
+      )}
+
       {/* 栄養素の詳しい効果・不足症状を表示するモーダル（ⓘタップ時） */}
       {infoNutrient && (
         <div
@@ -1180,7 +1447,7 @@ function NutrientRow({
   );
 }
 ..
-..
+echo ..
 ===== src\pages\MenuPage.tsx =====
 echo ..
 // ---------- src/pages/MenuPage.tsx ----------
@@ -1193,7 +1460,7 @@ export default function MenuPage() {
     </div>
   )
 }..
-..
+echo ..
 ===== src\pages\RecipeDetailPage.tsx =====
 echo ..
 // ファイル: src/pages/RecipeDetailPage.tsx
@@ -1438,7 +1705,7 @@ export default function RecipeDetailPage() {
     </div>
   )
 }..
-..
+echo ..
 ===== src\pages\RecipeListPage.tsx =====
 echo ..
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
@@ -1618,7 +1885,7 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
   )
 }
 ..
-..
+echo ..
 ===== src\pages\SettingsPage.tsx =====
 echo ..
 // ---------- src/pages/SettingsPage.tsx ----------
@@ -1641,7 +1908,7 @@ export default function SettingsPage() {
   )
 }
 ..
-..
+echo ..
 ===== src\pages\ShoppingPage.tsx =====
 echo ..
 // ---------- src/pages/ShoppingPage.tsx ----------
@@ -1657,7 +1924,7 @@ function Placeholder({ icon, title }: { icon: string; title: string }) {
     </div>
   )
 }..
-..
+echo ..
 ===== src\types\ingredient.ts =====
 echo ..
 export type IngredientCategory =
@@ -1708,11 +1975,12 @@ export interface IngredientMaster {
   magnesium_mg_per_100g: number | null;    // ← 追加
   created_by: string | null;
   peak_season_months: number[] | null;
+  usual_product_image_path: string | null;
   created_at: string;
   updated_at: string;
   
 }..
-..
+echo ..
 ===== src\types\recipe.ts =====
 echo ..
 // src/types/recipe.ts（Recipe型にcooking_time_minutes / cook_countを追加）
@@ -1770,4 +2038,4 @@ export type RecipeWithDetail = Recipe & {
   steps: Step[]
 }
 ..
-..
+echo ..

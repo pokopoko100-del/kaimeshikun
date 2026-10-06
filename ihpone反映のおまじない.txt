@@ -1,0 +1,4 @@
+npm run build
+git add .
+git commit -m "変更内容"
+git push

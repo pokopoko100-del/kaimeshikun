@@ -46,6 +46,7 @@ export interface IngredientMaster {
   magnesium_mg_per_100g: number | null;    // ← 追加
   created_by: string | null;
   peak_season_months: number[] | null;
+  usual_product_image_path: string | null;
   created_at: string;
   updated_at: string;
   
