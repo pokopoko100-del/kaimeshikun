@@ -1,11 +1,12 @@
 // src/pages/MenuPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 前提：09_menu_status_migration.sql を実行済み（recipes.plan_confirmed 列がある）
+// 前提：09_menu_status_migration.sql（plan_confirmed 列）と 11_cook_logs_migration.sql（cook_logs テーブル）を実行済み
 // 献立画面：日割りなし。「確定」と「候補」の2つのリストを、小さな行（料理名＋引用元）で並べる（ボタンなし・スワイプで操作）
 //   【候補】 → 右スワイプ：確定に追加 ／ ← 左スワイプ：削除（献立から外す。レシピは残る）
-//   【確定】 → 右スワイプ：作った（作った回数 +1、献立から外れる） ／ ← 左スワイプ：候補に戻す
-// 操作のあとに「元に戻す」付きのメッセージを数秒表示
-// 一番上に「🛒 買い物リストに追加」ボタン（確定した料理の材料を合計 → 選択・数量変更 → 確定で買い物リストへ）
-// 上のバーはなし。人数切替は「確定」見出しの右端（共通設定。一覧・詳細と同じ人数で表示）
+//   【確定】 → 右スワイプ：作った（作った回数 +1 ＋ 作った日付を履歴に保存。献立から外れる） ／ ← 左スワイプ：候補に戻す
+// 一番上（スクロールしても固定）：
+//   ・1食あたりの平均価格・平均カロリー（食事回数＝確定した「主菜」と「麺・丼・ワンプレート」の数）
+//   ・「🛒 買い物リストに追加」ボタン
+// 人数切替は「確定」見出しの右端（共通設定。一覧・詳細と同じ人数で表示）
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useOutletContext } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
@@ -16,12 +17,16 @@ import type { SwipeAction } from '../components/SwipeRow'
 import ServingsStepper from '../components/ServingsStepper'
 import ShoppingAddSheet from '../components/ShoppingAddSheet'
 import { useServings } from '../lib/useServings'
+import { getHouseholdId } from '../lib/household'
+import { todayLocal } from '../lib/dates'
+import { errorText } from '../lib/errorText'
 
 type Recipe = Pick<
   RecipeBase,
   | 'id'
   | 'dish_name'
   | 'servings'
+  | 'category'
   | 'source_name'
   | 'cooking_time_minutes'
   | 'cook_count'
@@ -48,6 +53,9 @@ type Patch = {
 
 type Toast = { message: string; actionLabel: string; onAction: () => void }
 
+// 「1回の食事」として数えるサブカテゴリ（主菜と、麺・丼・ワンプレート）
+const MEAL_CATEGORIES = ['主菜', '麺・丼・ワンプレート']
+
 function roundSmart(value: number): number {
   const abs = Math.abs(value)
   if (abs === 0) return 0
@@ -71,14 +79,6 @@ function snapshot(r: MenuRow): Patch {
   }
 }
 
-function errorText(e: unknown): string {
-  if (e instanceof Error) return e.message
-  if (typeof e === 'object' && e !== null && 'message' in e) {
-    return String((e as { message: unknown }).message)
-  }
-  return '不明なエラー'
-}
-
 // スワイプのラベル
 const ACT_CONFIRM: SwipeAction = { label: '✅ 確定', readyLabel: '離して確定', className: 'bg-green-600' }
 const ACT_DELETE: SwipeAction = { label: '削除', readyLabel: '離して削除', className: 'bg-red-500' }
@@ -86,6 +86,10 @@ const ACT_COOKED: SwipeAction = { label: '🍳 作った', readyLabel: '離し�
 const ACT_BACK: SwipeAction = { label: '↩ 候補に戻す', readyLabel: '離して戻す', className: 'bg-gray-500' }
 
 export default function MenuPage() {
+  const { session } = useOutletContext<{ session: Session }>()
+  const navigate = useNavigate()
+  const userId = session.user.id
+
   const [rows, setRows] = useState<MenuRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -93,15 +97,13 @@ export default function MenuPage() {
   const [toast, setToast] = useState<Toast | null>(null)
   const [servings, setServings] = useServings()
   const [showAdd, setShowAdd] = useState(false) // 「買い物リストに追加」の確認画面
-  const { session } = useOutletContext<{ session: Session }>()
-  const navigate = useNavigate()
 
   useEffect(() => {
     ;(async () => {
       const { data, error: recErr } = await supabase
         .from('recipes')
         .select(
-          'id, dish_name, servings, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at',
+          'id, dish_name, servings, category, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at',
         )
         .eq('is_planned', true)
 
@@ -124,7 +126,8 @@ export default function MenuPage() {
         if (nutErr) {
           console.error(nutErr)
         } else {
-          ;(nutData ?? []).forEach((n) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ;(nutData ?? []).forEach((n: any) => {
             nutrition.set(String(n.recipe_id), {
               kcal: typeof n.calorie_per_serving === 'number' ? n.calorie_per_serving : null,
               price: typeof n.price_per_serving === 'number' ? n.price_per_serving : null,
@@ -197,18 +200,57 @@ export default function MenuPage() {
       `「${r.dish_name}」を献立から削除しました（レシピは残ります）`,
     )
 
-  const markCooked = (r: MenuRow) =>
-    act(
-      r,
-      {
-        is_planned: false,
-        plan_confirmed: false,
-        planned_by: null,
-        planned_at: null,
-        cook_count: r.cook_count + 1,
+  // 作った：作った日付を履歴（cook_logs）に保存 → 作った回数 +1 → 献立から外す
+  const markCooked = async (r: MenuRow) => {
+    if (busy) return
+    setBusy(true)
+    const before = snapshot(r)
+
+    // ① 作った日付を保存（先に保存。あとの更新に失敗したら、この履歴を消す）
+    let logId: string
+    try {
+      const householdId = await getHouseholdId(userId)
+      const { data, error: logErr } = await supabase
+        .from('cook_logs')
+        .insert({ household_id: householdId, recipe_id: r.id, cooked_on: todayLocal(), cooked_by: userId })
+        .select('id')
+        .single()
+      if (logErr) throw logErr
+      logId = (data as { id: string }).id
+    } catch (e) {
+      setBusy(false)
+      alert(
+        '作った日付の記録に失敗しました：' +
+          errorText(e) +
+          '\n（11_cook_logs_migration.sql を実行済みか確認してください）',
+      )
+      return
+    }
+
+    // ② 作った回数 +1、献立から外す
+    const ok = await applyPatch(r.id, {
+      is_planned: false,
+      plan_confirmed: false,
+      planned_by: null,
+      planned_at: null,
+      cook_count: r.cook_count + 1,
+    })
+    setBusy(false)
+    if (!ok) {
+      await supabase.from('cook_logs').delete().eq('id', logId)
+      return
+    }
+
+    setToast({
+      message: `「${r.dish_name}」を作りました（${r.cook_count + 1}回目）`,
+      actionLabel: '元に戻す',
+      onAction: () => {
+        void applyPatch(r.id, before)
+        void supabase.from('cook_logs').delete().eq('id', logId) // 履歴も取り消す
+        setToast(null)
       },
-      `「${r.dish_name}」を作りました（${r.cook_count + 1}回目）`,
-    )
+    })
+  }
 
   // 確定／候補に分ける（追加した順に並べる。新しいものが上）
   const { confirmed, candidates } = useMemo(() => {
@@ -220,8 +262,61 @@ export default function MenuPage() {
     }
   }, [rows])
 
+  // 1食あたりの平均（確定した料理ぜんぶの合計 ÷ 食事回数）。食事回数＝主菜と麺・丼・ワンプレートの数
+  const stats = useMemo(() => {
+    const meals = confirmed.filter((r) => r.category != null && MEAL_CATEGORIES.includes(r.category)).length
+    let totalKcal = 0
+    let totalPrice = 0
+    let uncertain = false
+    for (const r of confirmed) {
+      if (r.kcal != null) totalKcal += r.kcal * servings
+      else uncertain = true
+      if (r.price != null) totalPrice += r.price * servings
+      else uncertain = true
+      if (r.unresolved > 0) uncertain = true
+    }
+    return {
+      meals,
+      avgKcal: meals > 0 ? totalKcal / meals : null,
+      avgPrice: meals > 0 ? totalPrice / meals : null,
+      uncertain,
+    }
+  }, [confirmed, servings])
+
   return (
     <div className="min-h-screen bg-gray-50 pb-6">
+      {/* 一番上（スクロールしても固定）：1食あたりの平均 ＋ 買い物リストに追加 */}
+      <div className="sticky top-0 z-40 border-b border-gray-200 bg-gray-50 px-2 pb-2 pt-2">
+        <div className="mb-1.5 flex items-center justify-between gap-2 px-1 text-xs text-gray-600">
+          <span className="shrink-0">
+            🍽 食事 <b className="text-gray-900">{stats.meals}</b>回
+          </span>
+          {stats.meals > 0 ? (
+            <span className="min-w-0 truncate text-right">
+              1食平均{' '}
+              <b className="text-gray-900">{fmtVal(stats.avgPrice, '円')}</b>
+              {' ・ '}
+              <b className="text-gray-900">{fmtVal(stats.avgKcal, 'kcal')}</b>
+              {stats.uncertain && <span className="text-amber-600">※</span>}
+              <span className="text-gray-400">（{servings}人前）</span>
+            </span>
+          ) : (
+            <span className="min-w-0 truncate text-right text-gray-400">
+              1食平均 ―（確定した主菜・麺・丼がありません）
+            </span>
+          )}
+        </div>
+        <button
+          onClick={() => setShowAdd(true)}
+          disabled={confirmed.length === 0}
+          className="w-full rounded-lg bg-amber-500 py-2.5 text-sm font-bold text-white shadow-sm active:opacity-80 disabled:bg-gray-300"
+        >
+          {confirmed.length === 0
+            ? '🛒 買い物リストに追加（確定した料理がありません）'
+            : `🛒 買い物リストに追加（確定 ${confirmed.length}品）`}
+        </button>
+      </div>
+
       {error && <p className="p-4 text-sm text-red-600">読み込みエラー：{error}</p>}
 
       {loading ? (
@@ -232,17 +327,6 @@ export default function MenuPage() {
         </div>
       ) : (
         <div className="px-2 pt-2">
-          {/* 一番上：買い物リストに追加（確定した料理の材料を合計して、選んで追加する） */}
-          <button
-            onClick={() => setShowAdd(true)}
-            disabled={confirmed.length === 0}
-            className="mb-3 w-full rounded-lg bg-amber-500 py-2.5 text-sm font-bold text-white shadow-sm active:opacity-80 disabled:bg-gray-300"
-          >
-            {confirmed.length === 0
-              ? '🛒 買い物リストに追加（確定した料理がありません）'
-              : `🛒 買い物リストに追加（確定 ${confirmed.length}品）`}
-          </button>
-
           {/* 確定（見出しの右端に人数切替） */}
           <SectionTitle
             icon="✅"
@@ -271,14 +355,9 @@ export default function MenuPage() {
 
           {/* 候補 */}
           <div className="mt-4" />
-          <SectionTitle
-            icon="💭"
-            title="候補"
-            count={candidates.length}
-            hint="→確定 ←削除"
-          />
+          <SectionTitle icon="💭" title="候補" count={candidates.length} hint="→確定 ←削除" />
           {candidates.length === 0 ? (
-            <Empty text="候補はありません（レシピ一覧で左スワイプ／＋で追加）" />
+            <Empty text="候補はありません（レシピ一覧で右スワイプ／＋で追加）" />
           ) : (
             <div className="space-y-1">
               {candidates.map((r) => (
@@ -302,7 +381,7 @@ export default function MenuPage() {
         <ShoppingAddSheet
           recipes={confirmed.map((r) => ({ id: r.id, dish_name: r.dish_name, servings: r.servings }))}
           servings={servings}
-          userId={session.user.id}
+          userId={userId}
           onClose={() => setShowAdd(false)}
           onAdded={(count) => {
             setShowAdd(false)
@@ -318,7 +397,7 @@ export default function MenuPage() {
         />
       )}
 
-      {/* 操作のあとに出る「元に戻す」メッセージ */}
+      {/* 操作のあとに出るメッセージ */}
       {toast && (
         <div
           className="pointer-events-none fixed inset-x-0 z-50 flex justify-center px-3"
@@ -385,9 +464,7 @@ function MenuLine({ row: r, servings }: { row: MenuRow; servings: number }) {
           {r.dish_name}
           {r.unresolved > 0 && <span className="ml-1 text-[10px] font-normal text-amber-600">※</span>}
         </div>
-        {r.source_name && (
-          <div className="truncate text-[11px] leading-tight text-gray-400">{r.source_name}</div>
-        )}
+        {r.source_name && <div className="truncate text-[11px] leading-tight text-gray-400">{r.source_name}</div>}
       </div>
 
       {/* 右：人数ぶんのカロリー・費用 */}

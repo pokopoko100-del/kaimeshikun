@@ -1,11 +1,13 @@
 // src/pages/ShoppingPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：10_shopping_migration.sql を実行済み
 // 買い物リスト：
-//   ・並びは「カテゴリ順（設定画面で変更可）」で自動配置 → 「並べ替え」で▲▼から手動で入れ替え
+//   ・一番上の帯（タイトル・自動配置）はスクロールしても固定
+//   ・並びは「カテゴリ順（設定画面で変更可）」で自動配置 →「長押し → ドラッグ＆ドロップ」で手動で入れ替え
 //   ・タップ：カゴに入れた／戻す　　← 左スワイプ：削除（元に戻すメッセージあり）
 //   ・「自動配置」：手動で入れ替えた順をリセットして、カテゴリ順に並べ直す
 //   ・アプリを開き直したとき・別のアプリから戻ったときに、最新の内容を読み込み直す
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { Link, useOutletContext } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../supabaseClient'
@@ -16,10 +18,27 @@ import { categoryRank, CATEGORY_BADGE, normalizeCategoryOrder } from '../lib/cat
 import { fetchCategoryOrder, findShoppingListId, getHouseholdId } from '../lib/household'
 import { formatAmount } from '../lib/shoppingAggregate'
 import { errorText } from '../lib/errorText'
+import { computeToIndex, planSortOrder, shiftSlots } from '../lib/dragReorder'
 
 type Toast = { message: string; actionLabel: string; onAction: () => void }
 
 const SWIPE_DELETE: SwipeAction = { label: '削除', readyLabel: '離して削除', className: 'bg-red-500' }
+
+const LONG_PRESS_MS = 350 // この時間ずっと押していると、ドラッグ開始
+const MOVE_TOLERANCE = 8 // 押している間にこれ以上動いたら、長押しではなくスクロール／スワイプ扱い(px)
+const GAP = 4 // 行と行のすき間(px)。行の mb-1 と同じ
+
+// ドラッグ中の測定値
+type Rect = { id: string; top: number; height: number } // top はページ全体での位置
+type DragInfo = {
+  id: string
+  fromIndex: number // ドラッグ開始時の位置
+  startClientY: number // ドラッグ開始時の指の位置
+  oldScreenTop: number // ドラッグ開始時、行が画面上で見えていた位置
+  anchor: number | null // 行の見た目を指に合わせるための補正（測定後に決まる）
+  rects: Rect[] // 全行の位置（見出しを消したあとに測定）
+}
+type DragView = { t: number; toIndex: number; from: number; height: number }
 
 // 並び順（sort_order → 追加した順）
 function bySort(a: ShoppingItem, b: ShoppingItem): number {
@@ -35,8 +54,19 @@ export default function ShoppingPage() {
   const [listId, setListId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [reorder, setReorder] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
+
+  // ドラッグ関連
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dragView, setDragView] = useState<DragView>({ t: 0, toIndex: 0, from: 0, height: 0 })
+  const dragRef = useRef<DragInfo | null>(null)
+  const toIndexRef = useRef(0)
+  const pressRef = useRef<{ id: string; x: number; y: number; timer: number } | null>(null)
+  const lastYRef = useRef(0)
+  const dragActiveRef = useRef(false)
+  const suppressClickUntil = useRef(0)
+  const rowEls = useRef(new Map<string, HTMLDivElement>())
+  const headerRef = useRef<HTMLDivElement>(null)
 
   const load = useCallback(async () => {
     try {
@@ -67,10 +97,10 @@ export default function ShoppingPage() {
     void load()
   }, [load])
 
-  // 別のアプリから戻ったとき（家族が追加した分など）に、最新を読み込み直す
+  // 別のアプリから戻ったとき（家族が追加した分など）に、最新を読み込み直す（ドラッグ中は除く）
   useEffect(() => {
     const onVisible = () => {
-      if (document.visibilityState === 'visible') void load()
+      if (document.visibilityState === 'visible' && !dragActiveRef.current) void load()
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => document.removeEventListener('visibilitychange', onVisible)
@@ -85,6 +115,12 @@ export default function ShoppingPage() {
 
   const open = useMemo(() => items.filter((i) => !i.is_checked).sort(bySort), [items])
   const checked = useMemo(() => items.filter((i) => i.is_checked).sort(bySort), [items])
+
+  // ドラッグ処理から最新の並びを読むための入れ物
+  const openRef = useRef<ShoppingItem[]>([])
+  useEffect(() => {
+    openRef.current = open
+  }, [open])
 
   const patchLocal = (id: string, p: Partial<ShoppingItem>) =>
     setItems((list) => list.map((i) => (i.id === id ? { ...i, ...p } : i)))
@@ -149,28 +185,6 @@ export default function ShoppingPage() {
     setItems((list) => list.filter((i) => !i.is_checked))
   }
 
-  // ---- 手動の入れ替え（▲▼）：隣の材料と並び順を交換 ----
-  const move = async (id: string, dir: -1 | 1) => {
-    const i = open.findIndex((x) => x.id === id)
-    const j = i + dir
-    if (i < 0 || j < 0 || j >= open.length) return
-    const a = open[i]
-    const b = open[j]
-    // 並び順の値が同じだったときは、少しずらして入れ替える
-    const newA = a.sort_order === b.sort_order ? b.sort_order + dir * 0.5 : b.sort_order
-    const newB = a.sort_order
-    patchLocal(a.id, { sort_order: newA })
-    patchLocal(b.id, { sort_order: newB })
-    const [r1, r2] = await Promise.all([
-      supabase.from('shopping_items').update({ sort_order: newA }).eq('id', a.id),
-      supabase.from('shopping_items').update({ sort_order: newB }).eq('id', b.id),
-    ])
-    if (r1.error || r2.error) {
-      alert('並べ替えに失敗しました: ' + errorText(r1.error ?? r2.error))
-      void load()
-    }
-  }
-
   // ---- 自動配置：カテゴリ順に並べ直す（手動で入れ替えた順はリセット） ----
   const autoArrange = async () => {
     if (!window.confirm('手動で入れ替えた順をリセットして、カテゴリ順に並べ直しますか？')) return
@@ -189,31 +203,215 @@ export default function ShoppingPage() {
     }
   }
 
+  // =====================================================================
+  // 長押し → ドラッグ＆ドロップ
+  //   1) 行を350ms押し続ける（途中で動かすとスクロール／スワイプ扱いで中止）
+  //   2) 行が浮き上がる。ここから指を動かすと、行が指についてくる（画面の端に近づくと自動スクロール）
+  //   3) 指を離した位置に入る。動かしたのは1行だけ。前後の行の「並び順」の真ん中の値を入れる
+  // =====================================================================
+
+  // ドロップ：動かした行の並び順を決めて保存（計算は lib/dragReorder.ts）
+  const commitMove = useCallback(
+    async (id: string, toIndex: number) => {
+      const plan = planSortOrder(openRef.current, id, toIndex)
+      if (plan.kind === 'none') return
+
+      if (plan.kind === 'single') {
+        const value = plan.value
+        setItems((l) => l.map((i) => (i.id === id ? { ...i, sort_order: value } : i)))
+        const { error: e } = await supabase
+          .from('shopping_items')
+          .update({ sort_order: value, updated_by: userId })
+          .eq('id', id)
+        if (e) {
+          alert('並べ替えに失敗しました: ' + errorText(e))
+          void load()
+        }
+        return
+      }
+
+      // 前後の値が近すぎたときは、全部振り直す
+      const numbers = new Map(plan.orders.map((o) => [o.id, o.sort_order]))
+      setItems((l) => l.map((i) => (numbers.has(i.id) ? { ...i, sort_order: numbers.get(i.id) as number } : i)))
+      const results = await Promise.all(
+        plan.orders.map((o) => supabase.from('shopping_items').update({ sort_order: o.sort_order }).eq('id', o.id)),
+      )
+      const failed = results.find((r) => r.error)
+      if (failed?.error) {
+        alert('並べ替えに失敗しました: ' + errorText(failed.error))
+        void load()
+      }
+    },
+    [load, userId],
+  )
+
+  const cancelPress = () => {
+    const p = pressRef.current
+    if (p) {
+      window.clearTimeout(p.timer)
+      pressRef.current = null
+    }
+  }
+
+  // 長押しが成立したとき：ドラッグ開始
+  const startDrag = useCallback((id: string) => {
+    const el = rowEls.current.get(id)
+    const from = openRef.current.findIndex((i) => i.id === id)
+    if (!el || from < 0) return
+    pressRef.current = null
+    const r = el.getBoundingClientRect()
+    dragRef.current = {
+      id,
+      fromIndex: from,
+      startClientY: lastYRef.current,
+      oldScreenTop: r.top,
+      anchor: null,
+      rects: [],
+    }
+    toIndexRef.current = from
+    dragActiveRef.current = true // これ以降、画面のスクロールを止める
+    setDragView({ t: 0, toIndex: from, from, height: r.height })
+    setDragId(id)
+  }, [])
+
+  // ドラッグ終了（指を離した／中断された）
+  const finishDrag = useCallback(
+    (cancelled: boolean) => {
+      const d = dragRef.current
+      if (!d) return
+      const toIndex = toIndexRef.current
+      dragRef.current = null
+      dragActiveRef.current = false
+      suppressClickUntil.current = Date.now() + 400 // 指を離した瞬間のタップで「カゴに入れる」が働かないように
+      setDragId(null)
+      if (cancelled || toIndex === d.fromIndex) return
+      void commitMove(d.id, toIndex)
+    },
+    [commitMove],
+  )
+
+  // ① カテゴリ見出しが消えた直後に、全行の位置を測る（見出しの分だけ行がずれるので、指に合わせて補正）
+  useLayoutEffect(() => {
+    const d = dragRef.current
+    if (!dragId || !d) return
+    const rects: Rect[] = []
+    for (const it of openRef.current) {
+      const el = rowEls.current.get(it.id)
+      if (!el) continue
+      const r = el.getBoundingClientRect()
+      rects.push({ id: it.id, top: r.top + window.scrollY, height: r.height })
+    }
+    const me = rects.find((r) => r.id === dragId)
+    if (!me) return
+    d.rects = rects
+    d.anchor = d.oldScreenTop - me.top
+    setDragView({ t: d.anchor + window.scrollY, toIndex: d.fromIndex, from: d.fromIndex, height: me.height })
+  }, [dragId])
+
+  // ② ドラッグ中：毎フレーム、指の位置に行を合わせ、入る位置を計算（画面の端では自動スクロール）
+  useEffect(() => {
+    if (!dragId) return
+    let raf = 0
+    const tick = () => {
+      const d = dragRef.current
+      if (d && d.anchor !== null) {
+        const y = lastYRef.current
+        const topEdge = (headerRef.current?.getBoundingClientRect().bottom ?? 0) + 40
+        const bottomEdge = window.innerHeight - 120
+        if (y < topEdge) window.scrollBy(0, -Math.min(18, (topEdge - y) / 6 + 2))
+        else if (y > bottomEdge) window.scrollBy(0, Math.min(18, (y - bottomEdge) / 6 + 2))
+
+        const t = d.anchor + window.scrollY + (y - d.startClientY)
+        const me = d.rects.find((r) => r.id === d.id)
+        if (me) {
+          const toIndex = computeToIndex(d.rects, d.id, t)
+          toIndexRef.current = toIndex
+          setDragView((prev) =>
+            Math.abs(prev.t - t) < 0.5 && prev.toIndex === toIndex ? prev : { ...prev, t, toIndex },
+          )
+        }
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [dragId])
+
+  // ③ ドラッグ中の指の動き・離したことを、画面全体で受け取る
+  useEffect(() => {
+    if (!dragId) return
+    const move = (e: PointerEvent) => {
+      lastYRef.current = e.clientY
+    }
+    const up = () => finishDrag(false)
+    const cancel = () => finishDrag(true)
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', cancel)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', cancel)
+    }
+  }, [dragId, finishDrag])
+
+  // ④ ドラッグ中は、画面が縦にスクロールしないようにする（iPhoneなどのタッチ操作用）
+  useEffect(() => {
+    const block = (e: TouchEvent) => {
+      if (dragActiveRef.current && e.cancelable) e.preventDefault()
+    }
+    window.addEventListener('touchmove', block, { passive: false })
+    return () => window.removeEventListener('touchmove', block)
+  }, [])
+
+  // 画面を離れるときの後片付け
+  useEffect(() => {
+    return () => {
+      const p = pressRef.current
+      if (p) window.clearTimeout(p.timer)
+      dragActiveRef.current = false
+    }
+  }, [])
+
+  // 行の上での指の動き（長押しの判定）
+  const onRowPointerDown = (e: ReactPointerEvent<HTMLDivElement>, id: string) => {
+    if (dragRef.current) return
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    cancelPress()
+    lastYRef.current = e.clientY
+    const timer = window.setTimeout(() => startDrag(id), LONG_PRESS_MS)
+    pressRef.current = { id, x: e.clientX, y: e.clientY, timer }
+  }
+  const onRowPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    lastYRef.current = e.clientY
+    const p = pressRef.current
+    if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > MOVE_TOLERANCE) cancelPress()
+  }
+  // ドラッグ直後のクリックは無効にする（ドロップした瞬間に「カゴに入れる」が働かないように）
+  const onRowClickCapture = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (Date.now() < suppressClickUntil.current) {
+      e.preventDefault()
+      e.stopPropagation()
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gray-50 pb-6">
-      {/* 1行だけの小さな操作バー */}
-      <div className="flex items-center gap-2 px-3 pb-1 pt-3">
+      {/* 一番上の帯（スクロールしても固定） */}
+      <div
+        ref={headerRef}
+        className="sticky top-0 z-40 flex items-center gap-2 border-b border-gray-200 bg-white px-3 py-2"
+      >
         <h1 className="text-sm font-bold text-gray-900">🛒 買い物リスト</h1>
         <span className="rounded-full bg-gray-200 px-1.5 text-[11px] font-semibold text-gray-600">{open.length}</span>
-        <div className="ml-auto flex items-center gap-1.5">
-          {reorder && (
-            <button
-              onClick={autoArrange}
-              className="rounded-full border border-gray-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-gray-600"
-            >
-              自動配置
-            </button>
-          )}
-          <button
-            onClick={() => setReorder((v) => !v)}
-            disabled={open.length < 2}
-            className={`rounded-full px-2.5 py-1 text-[11px] font-semibold disabled:opacity-40 ${
-              reorder ? 'bg-amber-500 text-white' : 'border border-gray-300 bg-white text-gray-600'
-            }`}
-          >
-            {reorder ? '完了' : '並べ替え'}
-          </button>
-        </div>
+        <span className="ml-auto text-[10px] text-gray-400">長押しで並べ替え</span>
+        <button
+          onClick={autoArrange}
+          disabled={open.length < 2}
+          className="shrink-0 rounded-full border border-gray-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-gray-600 disabled:opacity-40"
+        >
+          自動配置
+        </button>
       </div>
 
       {error && <p className="px-4 py-2 text-sm text-red-600">読み込みエラー：{error}</p>}
@@ -240,29 +438,50 @@ export default function ShoppingPage() {
 
           {/* 買うもの */}
           {open.map((it, idx) => {
-            const showHeader = idx === 0 || open[idx - 1].category !== it.category
-            const row = (
-              <ItemRow
-                item={it}
-                reorder={reorder}
-                canUp={idx > 0}
-                canDown={idx < open.length - 1}
-                onToggle={() => toggleChecked(it)}
-                onUp={() => move(it.id, -1)}
-                onDown={() => move(it.id, 1)}
-              />
-            )
+            const isDragged = dragId === it.id
+            // ドラッグ中は見出しを隠す（並べ替え中は、カテゴリをまたいで自由に動かせるため）
+            const showHeader = !dragId && (idx === 0 || open[idx - 1].category !== it.category)
+
+            let style: CSSProperties | undefined
+            if (dragId) {
+              if (isDragged) {
+                style = {
+                  transform: `translateY(${dragView.t}px) scale(1.02)`,
+                  zIndex: 30,
+                  position: 'relative',
+                  boxShadow: '0 8px 20px rgba(0,0,0,0.25)',
+                  borderRadius: 12,
+                }
+              } else {
+                // 動かしている行の前後にいる行は、1行ぶん上下にずれて場所を空ける
+                const slots = shiftSlots(idx, dragView.from, dragView.toIndex)
+                style = {
+                  transform: `translateY(${slots * (dragView.height + GAP)}px)`,
+                  transition: 'transform 150ms ease-out',
+                }
+              }
+            }
+
             return (
               <div key={it.id}>
                 {showHeader && <CategoryHeader category={it.category} />}
-                <div className="mb-1">
-                  {reorder ? (
-                    <div className="overflow-hidden rounded-xl">{row}</div>
-                  ) : (
-                    <SwipeRow left={SWIPE_DELETE} onSwipeLeft={() => removeItem(it)}>
-                      {row}
-                    </SwipeRow>
-                  )}
+                <div
+                  ref={(el) => {
+                    if (el) rowEls.current.set(it.id, el)
+                    else rowEls.current.delete(it.id)
+                  }}
+                  className="mb-1 select-none [-webkit-touch-callout:none]"
+                  style={style}
+                  onPointerDown={(e) => onRowPointerDown(e, it.id)}
+                  onPointerMove={onRowPointerMove}
+                  onPointerUp={cancelPress}
+                  onPointerCancel={cancelPress}
+                  onClickCapture={onRowClickCapture}
+                  onContextMenu={(e) => e.preventDefault()}
+                >
+                  <SwipeRow left={SWIPE_DELETE} onSwipeLeft={() => removeItem(it)} disabled={dragId !== null}>
+                    <ItemRow item={it} onToggle={() => toggleChecked(it)} />
+                  </SwipeRow>
                 </div>
               </div>
             )
@@ -286,23 +505,17 @@ export default function ShoppingPage() {
               {checked.map((it) => (
                 <div key={it.id} className="mb-1">
                   <SwipeRow left={SWIPE_DELETE} onSwipeLeft={() => removeItem(it)}>
-                    <ItemRow
-                      item={it}
-                      reorder={false}
-                      canUp={false}
-                      canDown={false}
-                      onToggle={() => toggleChecked(it)}
-                      onUp={() => {}}
-                      onDown={() => {}}
-                    />
+                    <ItemRow item={it} onToggle={() => toggleChecked(it)} />
                   </SwipeRow>
                 </div>
               ))}
             </div>
           )}
 
-          {open.length > 0 && !reorder && (
-            <p className="mt-3 px-1 text-[10px] text-gray-400">タップ：カゴに入れる　←左スワイプ：削除</p>
+          {open.length > 0 && (
+            <p className="mt-3 px-1 text-[10px] text-gray-400">
+              タップ：カゴに入れる　←左スワイプ：削除　長押し：並べ替え
+            </p>
           )}
         </div>
       )}
@@ -336,30 +549,13 @@ function CategoryHeader({ category }: { category: string }) {
 }
 
 // ---------- 買い物の1行（コンパクト：名前＋どのレシピ用か／右に数量） ----------
-function ItemRow({
-  item,
-  reorder,
-  canUp,
-  canDown,
-  onToggle,
-  onUp,
-  onDown,
-}: {
-  item: ShoppingItem
-  reorder: boolean
-  canUp: boolean
-  canDown: boolean
-  onToggle: () => void
-  onUp: () => void
-  onDown: () => void
-}) {
+function ItemRow({ item, onToggle }: { item: ShoppingItem; onToggle: () => void }) {
   const done = item.is_checked
   const amount = formatAmount(item.quantity, item.unit)
   return (
     <div className="flex items-center gap-2 bg-white px-3 py-1.5">
       <button
-        onClick={reorder ? undefined : onToggle}
-        disabled={reorder}
+        onClick={onToggle}
         aria-label={done ? 'カゴから戻す' : 'カゴに入れる'}
         className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
       >
@@ -371,38 +567,17 @@ function ItemRow({
           ✓
         </span>
         <span className="min-w-0 flex-1">
-          <span className={`block truncate text-sm font-medium leading-tight ${done ? 'text-gray-400 line-through' : 'text-gray-800'}`}>
+          <span
+            className={`block truncate text-sm font-medium leading-tight ${done ? 'text-gray-400 line-through' : 'text-gray-800'}`}
+          >
             {item.item_name}
           </span>
-          {item.note && (
-            <span className="block truncate text-[10px] leading-tight text-gray-400">{item.note}</span>
-          )}
+          {item.note && <span className="block truncate text-[10px] leading-tight text-gray-400">{item.note}</span>}
         </span>
         <span className={`shrink-0 whitespace-nowrap text-sm font-semibold ${done ? 'text-gray-400' : 'text-gray-700'}`}>
           {amount}
         </span>
       </button>
-
-      {reorder && (
-        <div className="flex shrink-0 gap-1">
-          <button
-            onClick={onUp}
-            disabled={!canUp}
-            aria-label="上へ"
-            className="h-8 w-8 rounded-md border border-gray-300 bg-white text-sm text-gray-600 active:bg-gray-100 disabled:opacity-30"
-          >
-            ▲
-          </button>
-          <button
-            onClick={onDown}
-            disabled={!canDown}
-            aria-label="下へ"
-            className="h-8 w-8 rounded-md border border-gray-300 bg-white text-sm text-gray-600 active:bg-gray-100 disabled:opacity-30"
-          >
-            ▼
-          </button>
-        </div>
-      )}
     </div>
   )
 }

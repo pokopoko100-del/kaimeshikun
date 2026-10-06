@@ -1,13 +1,11 @@
 // src/pages/RecipeDetailPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 前提：recipe_nutrition ビュー（01）と、recipes.plan_confirmed 列（09）を作成済みであること
+// 前提：recipe_nutrition ビュー（01）、recipes.plan_confirmed 列（09）、cook_logs テーブル（11）を作成済みであること
 // 今回の変更：
-//  ・「作る予定」ボタンを「献立候補」に変更。状態は 未追加／候補／確定 の3つを表示
-//  ・追加は「候補」から。外すときは確定も解除（確定・作ったは献立画面で行う）
-//  ・人数を変えられるようにした（「－ 2人前 ＋」。レシピ一覧・献立と共通の設定）。
-//    カロリー・費用・栄養素は選んだ人数ぶん、材料の分量も人数に合わせて自動で増減
+//  ・「🍳 作った履歴」を追加。献立で「作った」にした日付が、新しい順に並ぶ（11 を実行した後の分から）
 // これまでの内容：
+//  ・人数を変えられる（「－ 2人前 ＋」。レシピ一覧・献立と共通の設定）。カロリー・費用・栄養素・材料の分量が連動
+//  ・献立候補トグル（未追加／候補／確定）。追加は「候補」から。確定・作ったは献立画面で行う
 //  ・カロリー／費用／栄養素は recipe_nutrition ビュー（材料マスタから計算）から表示
-//  ・栄養素（たんぱく質・ビタミン・ミネラルなど）をタップで開閉
 //  ・計算できていない材料には「未計算」マーク
 //  ・分量は「大さじ3」のように、大さじ・小さじは単位を先頭に表示
 import { useEffect, useMemo, useState } from 'react'
@@ -15,7 +13,9 @@ import { useNavigate, useOutletContext, useParams } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../supabaseClient'
 import type { Ingredient, Recipe, Step } from '../types/recipe'
+import type { CookLog } from '../types/cookLog'
 import { useRecipeImage } from '../lib/useRecipeImage'
+import { formatCookedDate } from '../lib/dates'
 import { NUTRIENT_INFO_LIST } from '../data/nutrientInfo'
 import type { NutrientInfo } from '../data/nutrientInfo'
 import ServingsStepper from '../components/ServingsStepper'
@@ -28,6 +28,8 @@ type IngredientRow = Ingredient & {
 
 // recipe_nutrition ビューの1行
 type NutritionRow = Record<string, number | string | null>
+
+const LOG_PREVIEW = 10 // 作った履歴は、最初は新しい順に10件だけ表示
 
 // ---------- 計算ルール（SQLビュー 01_recipe_nutrition_view.sql と同じ） ----------
 
@@ -127,6 +129,9 @@ export default function RecipeDetailPage() {
   const [steps, setSteps] = useState<Step[]>([])
   const [nutrition, setNutrition] = useState<NutritionRow | null>(null)
   const [nutritionFailed, setNutritionFailed] = useState(false)
+  const [cookLogs, setCookLogs] = useState<CookLog[]>([])
+  const [cookLogsFailed, setCookLogsFailed] = useState(false)
+  const [showAllLogs, setShowAllLogs] = useState(false)
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [togglingPlanned, setTogglingPlanned] = useState(false)
@@ -143,7 +148,7 @@ export default function RecipeDetailPage() {
       setLoading(true)
       setErrorMessage(null)
 
-      const [recipeResult, ingredientsResult, stepsResult, nutritionResult] = await Promise.all([
+      const [recipeResult, ingredientsResult, stepsResult, nutritionResult, logsResult] = await Promise.all([
         supabase.from('recipes').select('*').eq('id', id).single(),
         supabase
           .from('ingredients')
@@ -152,6 +157,12 @@ export default function RecipeDetailPage() {
           .order('sort_order'),
         supabase.from('steps').select('*').eq('recipe_id', id).order('step_number'),
         supabase.from('recipe_nutrition').select('*').eq('recipe_id', id).maybeSingle(),
+        supabase
+          .from('cook_logs')
+          .select('id, household_id, recipe_id, cooked_on, cooked_by, created_at')
+          .eq('recipe_id', id)
+          .order('cooked_on', { ascending: false })
+          .order('created_at', { ascending: false }),
       ])
 
       if (isCancelled) return
@@ -187,6 +198,14 @@ export default function RecipeDetailPage() {
         setNutritionFailed(true)
       } else {
         setNutrition((nutritionResult.data as NutritionRow | null) ?? null)
+      }
+
+      // 作った履歴：読めなくても（11のSQL未実行など）、ほかの表示は止めない
+      if (logsResult.error) {
+        console.error(logsResult.error)
+        setCookLogsFailed(true)
+      } else {
+        setCookLogs((logsResult.data ?? []) as CookLog[])
       }
       setLoading(false)
     }
@@ -275,6 +294,9 @@ export default function RecipeDetailPage() {
     : recipe.plan_confirmed
       ? 'confirmed'
       : 'candidate'
+
+  // 作った履歴（新しい順に10件。「すべて表示」で全件）
+  const shownLogs = showAllLogs ? cookLogs : cookLogs.slice(0, LOG_PREVIEW)
 
   return (
     <div className="max-w-md mx-auto pb-6">
@@ -463,6 +485,46 @@ export default function RecipeDetailPage() {
                 </li>
               ))}
             </ol>
+          )}
+        </section>
+
+        {/* 作った履歴（献立で「作った」にした日付） */}
+        <section className="mt-6">
+          <h2 className="font-semibold text-gray-800 mb-2">
+            🍳 作った履歴
+            <span className="ml-2 text-xs font-normal text-gray-400">{recipe.cook_count}回</span>
+          </h2>
+          {cookLogsFailed ? (
+            <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              作った履歴を読み込めませんでした（11_cook_logs_migration.sql を実行済みか確認してください）。
+            </p>
+          ) : cookLogs.length === 0 ? (
+            <p className="text-sm text-gray-400">
+              日付の記録はまだありません。献立で「作った」にすると、ここに残ります。
+            </p>
+          ) : (
+            <>
+              <ul className="bg-white rounded-xl shadow-sm divide-y divide-gray-100">
+                {shownLogs.map((log) => (
+                  <li key={log.id} className="px-4 py-2 text-sm text-gray-700">
+                    {formatCookedDate(log.cooked_on)}
+                  </li>
+                ))}
+              </ul>
+              {cookLogs.length > LOG_PREVIEW && (
+                <button
+                  onClick={() => setShowAllLogs((v) => !v)}
+                  className="mt-2 w-full rounded-lg border border-gray-300 bg-white py-2 text-xs font-semibold text-gray-600"
+                >
+                  {showAllLogs ? '閉じる ▲' : `すべて表示（${cookLogs.length}件） ▼`}
+                </button>
+              )}
+              {recipe.cook_count > cookLogs.length && (
+                <p className="mt-2 text-[11px] text-gray-400">
+                  ※ 日付が残るのは、履歴機能を入れたあとに「作った」にした分だけです（それ以前の分は回数のみ）。
+                </p>
+              )}
+            </>
           )}
         </section>
 

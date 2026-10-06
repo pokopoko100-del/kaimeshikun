@@ -1,4 +1,4 @@
-// src/components/SwipeRow.tsx（新規作成）
+// src/components/SwipeRow.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 左右にスワイプできる行。離したときに一定以上動いていたら、その向きの操作を実行する。
 //   左スワイプ（指を右→左）… onSwipeLeft  を実行（右側にラベルが現れる）
 //   右スワイプ（指を左→右）… onSwipeRight を実行（左側にラベルが現れる）
@@ -6,6 +6,7 @@
 // ・縦スクロールを邪魔しない（横の動きがはっきり大きいときだけ反応）
 // ・スワイプ直後のタップで、リンク先へ飛ばないようにする
 // ・iPhoneの「画面の左端から右へスワイプ＝戻る」と重ならないよう、左端24pxからの右スワイプは無視
+// ・disabled を true にすると、スワイプを一時的に無効にできる（長押しドラッグ中など）
 import { useRef, useState } from 'react'
 
 export type SwipeAction = {
@@ -23,12 +24,14 @@ export default function SwipeRow({
   right,
   onSwipeLeft,
   onSwipeRight,
+  disabled,
   children,
 }: {
   left?: SwipeAction // 左スワイプしたとき（右側）に出す表示
   right?: SwipeAction // 右スワイプしたとき（左側）に出す表示
   onSwipeLeft?: () => void
   onSwipeRight?: () => void
+  disabled?: boolean
   children: React.ReactNode
 }) {
   const [dx, setDx] = useState(0)
@@ -48,6 +51,7 @@ export default function SwipeRow({
   }
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (disabled) return
     if (e.pointerType === 'mouse' && e.button !== 0) return
     startRef.current = { x: e.clientX, y: e.clientY }
     axisRef.current = null
@@ -55,6 +59,7 @@ export default function SwipeRow({
   }
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (disabled) return
     const s = startRef.current
     if (!s) return
     const mx = e.clientX - s.x
