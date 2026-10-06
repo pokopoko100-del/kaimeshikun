@@ -1,21 +1,19 @@
-// src/components/Layout.tsx（全体を置き換え）※前回版から修正：sessionをOutletのcontextとして配る
+// src/components/Layout.tsx（全体を置き換え）※タブ順を「レシピ・材料・買い物・献立・設定」に変更
 import { NavLink, Outlet } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
 
 const tabs = [
   { to: '/recipes',  icon: '🍳', label: 'レシピ' },
+  { to: '/master',   icon: '🥕', label: '材料' },
   { to: '/shopping', icon: '🛒', label: '買い物' },
   { to: '/menu',     icon: '📅', label: '献立' },
-  { to: '/master',   icon: '🥕', label: '材料' },
   { to: '/settings', icon: '⚙️', label: '設定' },
 ]
 
-// ★修正点：sessionをpropsで受け取る
 export default function Layout({ session }: { session: Session }) {
   return (
     <div className="min-h-screen bg-white">
       <main className="pb-20">
-        {/* ★修正点：子画面(useOutletContext)へsessionを渡す */}
         <Outlet context={{ session }} />
       </main>
 
