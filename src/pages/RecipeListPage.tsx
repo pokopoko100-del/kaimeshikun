@@ -2,7 +2,8 @@
 // 前提：Supabaseに recipe_nutrition ビューを作成済みであること（01_recipe_nutrition_view.sql）
 // 機能：
 //  ・表示切替：「写真」（YouTube風2列）／「リスト」（材料画面と同じUI）
-//  ・絞り込み：すべて／作る予定（1行目）、ジャンル 和食・洋食・中華・その他（2行目）
+//  ・絞り込み：すべて／作る予定（1行目）、ジャンル 和食・洋食・中華・エスニック・その他（2行目）、
+//             サブカテゴリ 主菜・副菜・つまみ・汁物・スープ・麺・丼・ワンプレート・デザート・ソース・調味料（3行目）
 //  ・並び替え：作った回数が多い順（既定）／値段が安い順／カロリーが低い順／調理時間が短い順
 //             ／栄養素が多い順／食塩・脂質・糖質が少ない順
 //  ・値は「1人前あたり」。材料マスタから計算（未計算の材料があれば※表示、並び替えでは後ろへ）
@@ -36,7 +37,7 @@ type RecipeRow = Recipe & { nutrition: NutritionRow | null }
 const BUCKET = 'recipe-images'
 
 // ---------- ジャンル ----------
-const GENRES = ['和食', '洋食', '中華'] as const
+const GENRES = ['和食', '洋食', '中華', 'エスニック'] as const
 type GenreFilter = 'すべて' | (typeof GENRES)[number] | 'その他'
 const GENRE_CHIPS: GenreFilter[] = [...GENRES, 'その他']
 
@@ -44,12 +45,24 @@ const GENRE_COLOR: Record<string, string> = {
   和食: 'bg-red-100 text-red-700',
   洋食: 'bg-blue-100 text-blue-700',
   中華: 'bg-orange-100 text-orange-700',
+  エスニック: 'bg-green-100 text-green-700',
   その他: 'bg-gray-100 text-gray-700',
 }
 
 function genreOf(r: { genre: string | null }): string {
   return r.genre && (GENRES as readonly string[]).includes(r.genre) ? r.genre : 'その他'
 }
+
+// ---------- サブカテゴリ（recipes.category に保存する値） ----------
+const CATEGORIES = [
+  '主菜',
+  '副菜・つまみ',
+  '汁物・スープ',
+  '麺・丼・ワンプレート',
+  'デザート',
+  'ソース・調味料',
+] as const
+type CategoryFilter = 'すべて' | (typeof CATEGORIES)[number]
 
 // ---------- 並び替えの定義 ----------
 // 栄養素の「多い順」「少ない順」。キーは材料マスタ側の列名（nutrientInfo.ts と共通）
@@ -151,6 +164,7 @@ export default function RecipeListPage() {
   const [keyword, setKeyword] = useState('')
   const [plannedOnly, setPlannedOnly] = useState(false)
   const [genreFilter, setGenreFilter] = useState<GenreFilter>('すべて')
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('すべて')
   const [sortKey, setSortKey] = useState<string>('cook_count')
   const [viewMode, setViewMode] = useState<ViewMode>(() =>
     localStorage.getItem(VIEW_MODE_KEY) === 'list' ? 'list' : 'photo',
@@ -216,14 +230,16 @@ export default function RecipeListPage() {
     return recipes.filter((r) => {
       if (plannedOnly && !r.is_planned) return false
       if (genreFilter !== 'すべて' && genreOf(r) !== genreFilter) return false
+      if (categoryFilter !== 'すべて' && r.category !== categoryFilter) return false
       if (!k) return true
       return (
         r.dish_name.toLowerCase().includes(k) ||
         (r.source_name ?? '').toLowerCase().includes(k) ||
-        (r.genre ?? '').toLowerCase().includes(k)
+        (r.genre ?? '').toLowerCase().includes(k) ||
+        (r.category ?? '').toLowerCase().includes(k)
       )
     })
-  }, [recipes, keyword, plannedOnly, genreFilter])
+  }, [recipes, keyword, plannedOnly, genreFilter, categoryFilter])
 
   // 並び替え
   const sorted = useMemo(() => {
@@ -272,9 +288,11 @@ export default function RecipeListPage() {
   }, [sortKey])
   const sortNutrientCol = sortNutrient ? servingCol(String(sortNutrient.key)) : null
 
+  // 「すべて」：作る予定・ジャンル・サブカテゴリをまとめて解除
   const handleSelectAll = () => {
     setPlannedOnly(false)
     setGenreFilter('すべて')
+    setCategoryFilter('すべて')
   }
 
   return (
@@ -291,7 +309,10 @@ export default function RecipeListPage() {
 
         {/* 1段目：すべて・作る予定　／　右端：表示切替 */}
         <div className="mt-2 flex items-center gap-2">
-          <Chip active={!plannedOnly && genreFilter === 'すべて'} onClick={handleSelectAll}>
+          <Chip
+            active={!plannedOnly && genreFilter === 'すべて' && categoryFilter === 'すべて'}
+            onClick={handleSelectAll}
+          >
             すべて
           </Chip>
           <Chip active={plannedOnly} onClick={() => setPlannedOnly((p) => !p)}>
@@ -318,6 +339,19 @@ export default function RecipeListPage() {
           {GENRE_CHIPS.map((g) => (
             <Chip key={g} active={genreFilter === g} onClick={() => setGenreFilter((prev) => (prev === g ? 'すべて' : g))}>
               {g}
+            </Chip>
+          ))}
+        </div>
+
+        {/* 3段目：サブカテゴリ（横スクロール） */}
+        <div className="mt-1 flex gap-2 overflow-x-auto pb-1">
+          {CATEGORIES.map((c) => (
+            <Chip
+              key={c}
+              active={categoryFilter === c}
+              onClick={() => setCategoryFilter((prev) => (prev === c ? 'すべて' : c))}
+            >
+              {c}
             </Chip>
           ))}
         </div>
@@ -488,10 +522,13 @@ function ListCard({
   return (
     <Link to={`/recipes/${r.id}`} className="block rounded-xl bg-white shadow-sm active:opacity-70">
       <div className="flex items-center px-4 py-3">
-        {/* 左：①ジャンル＋作る予定 ②料理名 ③引用元（左揃え） */}
+        {/* 左：①ジャンル＋サブカテゴリ＋作る予定 ②料理名 ③引用元（左揃え） */}
         <div className="min-w-0 flex-1 text-left">
           <div className="flex items-center gap-1.5">
-            <span className={`rounded px-2 py-0.5 text-[10px] font-semibold ${GENRE_COLOR[genre]}`}>{genre}</span>
+            <span className={`shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold ${GENRE_COLOR[genre]}`}>{genre}</span>
+            {r.category && (
+              <span className="truncate rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">{r.category}</span>
+            )}
             {r.is_planned && (
               <span className="shrink-0 rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-600">
                 作る予定
