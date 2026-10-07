@@ -225,10 +225,14 @@ export default function App() {
 
 ===== src\main.tsx =====
 
+// src/main.tsx（ファイル全体。これで丸ごと置き換えてください）
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+
+// ズーム無効③：iPhone(Safari / ホーム画面アプリ)のピンチ拡大を止める
+document.addEventListener('gesturestart', (e) => e.preventDefault(), { passive: false })
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -239,19 +243,36 @@ createRoot(document.getElementById('root')!).render(
 
 ===== src\index.css =====
 
+/* src/index.css（ファイル全体。これで丸ごと置き換えてください） */
 @import "tailwindcss";
+
+/* ズーム無効①：ダブルタップでの拡大を防ぐ */
+html {
+  touch-action: manipulation;
+}
+
+/* ズーム無効②：iPhoneは文字が16px未満の入力欄をタップすると画面が勝手に拡大されるため、
+   タッチ端末（スマホ・タブレット）だけ入力欄の文字を16pxにそろえる。PCの見た目は変わらない */
+@media (hover: none) and (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
 
 ===== src\components\Layout.tsx =====
 .
-// src/components/Layout.tsx（全体を置き換え）※タブ順を「レシピ・材料・買い物・献立・設定」に変更
+// src/components/Layout.tsx（全体を置き換え）※タブ順を「レシピ・材料・献立・買い物・設定」に変更
 import { NavLink, Outlet } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
 
 const tabs = [
   { to: '/recipes',  icon: '🍳', label: 'レシピ' },
   { to: '/master',   icon: '🥕', label: '材料' },
-  { to: '/shopping', icon: '🛒', label: '買い物' },
   { to: '/menu',     icon: '📅', label: '献立' },
+  { to: '/shopping', icon: '🛒', label: '買い物' },
   { to: '/settings', icon: '⚙️', label: '設定' },
 ]
 
@@ -286,10 +307,11 @@ export default function Layout({ session }: { session: Session }) {
       </nav>
     </div>
   )
-}.
+}
+.
 .
 ===== src\components\LoginPage.tsx =====
-.
+..
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
 
@@ -402,8 +424,634 @@ export default function LoginPage() {
       </div>
     </div>
   )
+}..
+
+===== src\components\ServingsStepper.tsx =====
+..
+// src/components/ServingsStepper.tsx（新規作成）
+// 「－ 2人前 ＋」の人数切替ボタン
+import { MAX_SERVINGS, MIN_SERVINGS } from '../lib/useServings'
+
+export default function ServingsStepper({
+  value,
+  onChange,
+}: {
+  value: number
+  onChange: (n: number) => void
+}) {
+  return (
+    <div className="flex shrink-0 items-center overflow-hidden rounded-full border border-gray-300 bg-white text-xs font-bold text-gray-700">
+      <button
+        type="button"
+        onClick={() => onChange(value - 1)}
+        disabled={value <= MIN_SERVINGS}
+        aria-label="人数を減らす"
+        className="px-2.5 py-1 text-base leading-none active:bg-gray-100 disabled:opacity-30"
+      >
+        −
+      </button>
+      <span className="min-w-[3.2rem] text-center">{value}人前</span>
+      <button
+        type="button"
+        onClick={() => onChange(value + 1)}
+        disabled={value >= MAX_SERVINGS}
+        aria-label="人数を増やす"
+        className="px-2.5 py-1 text-base leading-none active:bg-gray-100 disabled:opacity-30"
+      >
+        ＋
+      </button>
+    </div>
+  )
 }
-echo ..
+..
+
+===== src\components\ShoppingAddSheet.tsx =====
+..
+// src/components/ShoppingAddSheet.tsx（新規作成）
+// 「買い物リストに追加」の確認画面（全画面）
+//   確定した献立の材料を合計して一覧表示 → 選択／削除／数量変更 → 「確定して買い物リストへ追加」
+//   ・人数は、献立画面の人数設定（○人前）で分量を計算
+//   ・すでに買い物リストにある材料は、最初は選択オフ（追加すると数量が足されます）
+import { useEffect, useMemo, useState } from 'react'
+import { supabase } from '../supabaseClient'
+import { aggregateIngredients, itemKeyOf } from '../lib/shoppingAggregate'
+import type { AggItem, RawIngredient, RecipeInfo } from '../lib/shoppingAggregate'
+import { addItemsToShoppingList } from '../lib/shoppingList'
+import { fetchCategoryOrder, findShoppingListId, getHouseholdId } from '../lib/household'
+import { CATEGORY_BADGE, normalizeCategoryOrder } from '../lib/categoryOrder'
+import { errorText } from '../lib/errorText'
+
+type SheetItem = AggItem & {
+  selected: boolean // 買い物リストに追加する
+  inList: boolean // すでに買い物リストにある（未購入）
+  qty: string // 入力中の数量（変更できる）
+}
+
+type Props = {
+  recipes: RecipeInfo[] // 確定している料理
+  servings: number // 何人前ぶん買うか
+  userId: string
+  onClose: () => void
+  onAdded: (count: number) => void
+}
+
+export default function ShoppingAddSheet({ recipes, servings, userId, onClose, onAdded }: Props) {
+  const [items, setItems] = useState<SheetItem[]>([])
+  const [order, setOrder] = useState<string[]>(normalizeCategoryOrder(null))
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  // 開いたときに1回だけ読み込む（編集中の内容が上書きされないよう、依存は空）
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const ids = recipes.map((r) => r.id)
+        const householdId = await getHouseholdId(userId)
+
+        const [ingRes, catOrder, listId] = await Promise.all([
+          supabase
+            .from('ingredients')
+            .select(
+              'recipe_id, ingredient_master_id, ingredient_name, quantity, unit, ingredient_master(ingredient_name, category, default_unit, unit_weight_g)',
+            )
+            .in('recipe_id', ids)
+            .order('sort_order'),
+          fetchCategoryOrder(householdId),
+          findShoppingListId(householdId),
+        ])
+        if (ingRes.error) throw ingRes.error
+
+        // 買い物リストに既にある（未購入の）材料
+        const inListKeys = new Set<string>()
+        if (listId) {
+          const { data: ex, error: exErr } = await supabase
+            .from('shopping_items')
+            .select('ingredient_master_id, item_name')
+            .eq('shopping_list_id', listId)
+            .eq('is_checked', false)
+          if (exErr) throw exErr
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ;(ex ?? []).forEach((e: any) => {
+            inListKeys.add(itemKeyOf(e.ingredient_master_id as string | null, e.item_name as string))
+          })
+        }
+
+        // 結合したマスタ情報は、配列で返る場合もあるのでそろえる
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const raws: RawIngredient[] = (ingRes.data ?? []).map((row: any) => {
+          const m = (Array.isArray(row.ingredient_master) ? row.ingredient_master[0] : row.ingredient_master) as
+            | RawIngredient['master']
+            | null
+            | undefined
+          return {
+            recipe_id: row.recipe_id as string,
+            ingredient_master_id: row.ingredient_master_id as string | null,
+            ingredient_name: row.ingredient_name as string,
+            quantity: row.quantity as string | null,
+            unit: row.unit as string | null,
+            master: m ?? null,
+          }
+        })
+
+        const agg = aggregateIngredients(raws, recipes, servings)
+        if (cancelled) return
+        setOrder(catOrder)
+        setItems(
+          agg.map((a) => {
+            const inList = inListKeys.has(itemKeyOf(a.masterId, a.name))
+            return { ...a, inList, selected: !inList, qty: a.quantity ?? '' }
+          }),
+        )
+      } catch (e) {
+        if (!cancelled) setError(errorText(e))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const patch = (key: string, p: Partial<SheetItem>) =>
+    setItems((list) => list.map((i) => (i.key === key ? { ...i, ...p } : i)))
+
+  const remove = (key: string) => setItems((list) => list.filter((i) => i.key !== key))
+
+  // カテゴリごとにまとめる（設定画面の順）
+  const groups = useMemo(() => {
+    const map = new Map<string, SheetItem[]>()
+    items.forEach((i) => {
+      const cat = order.includes(i.category) ? i.category : 'その他'
+      map.set(cat, [...(map.get(cat) ?? []), i])
+    })
+    return order
+      .filter((c) => map.has(c))
+      .map((c) => ({
+        category: c,
+        items: (map.get(c) as SheetItem[]).slice().sort((a, b) => a.name.localeCompare(b.name, 'ja')),
+      }))
+  }, [items, order])
+
+  const selectedCount = items.filter((i) => i.selected).length
+  const allSelected = items.length > 0 && selectedCount === items.length
+
+  const toggleAll = () => setItems((list) => list.map((i) => ({ ...i, selected: !allSelected })))
+
+  const confirm = async () => {
+    const chosen = items.filter((i) => i.selected)
+    if (chosen.length === 0 || saving) return
+    setSaving(true)
+    try {
+      await addItemsToShoppingList({
+        userId,
+        items: chosen.map((i) => ({
+          masterId: i.masterId,
+          name: i.name,
+          category: order.includes(i.category) ? i.category : 'その他',
+          quantity: i.qty.trim() === '' ? null : i.qty.trim(),
+          unit: i.unit,
+          note: i.recipeNames.join('・'),
+          recipeId: i.recipeIds.length === 1 ? i.recipeIds[0] : null,
+        })),
+      })
+      onAdded(chosen.length)
+    } catch (e) {
+      alert('買い物リストへの追加に失敗しました：' + errorText(e))
+      setSaving(false)
+    }
+  }
+
+  const inListCount = items.filter((i) => i.inList).length
+
+  return (
+    <div className="fixed inset-0 z-[70] flex flex-col bg-gray-50">
+      {/* 上部：タイトル・閉じる */}
+      <div className="flex items-center gap-2 bg-white px-3 py-2.5 shadow-sm">
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-base font-bold text-gray-900">🛒 買い物リストに追加</h2>
+          <p className="truncate text-[11px] text-gray-400">
+            確定 {recipes.length}品 ／ {servings}人前ぶん
+          </p>
+        </div>
+        <button
+          onClick={toggleAll}
+          disabled={items.length === 0}
+          className="shrink-0 rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 disabled:opacity-40"
+        >
+          {allSelected ? 'すべて解除' : 'すべて選択'}
+        </button>
+        <button
+          onClick={onClose}
+          aria-label="閉じる"
+          className="shrink-0 rounded-full bg-gray-100 px-2.5 py-1 text-sm text-gray-500"
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* 一覧 */}
+      <div className="flex-1 overflow-y-auto px-2 pb-4 pt-2">
+        {loading && (
+          <div className="space-y-1.5">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} className="h-12 animate-pulse rounded-lg bg-gray-200" />
+            ))}
+          </div>
+        )}
+        {error && <p className="p-4 text-sm text-red-600">読み込みエラー：{error}</p>}
+
+        {!loading && !error && items.length === 0 && (
+          <p className="p-8 text-center text-sm text-gray-400">追加できる材料がありません</p>
+        )}
+
+        {!loading && !error && inListCount > 0 && (
+          <p className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-700">
+            「リストにあり」の材料は、すでに買い物リストに入っているので最初はオフです。オンにすると数量が足されます。
+          </p>
+        )}
+
+        {groups.map((g) => (
+          <section key={g.category} className="mb-3">
+            <div className="mb-1 px-1">
+              <span
+                className={`rounded px-2 py-0.5 text-[11px] font-bold ${CATEGORY_BADGE[g.category] ?? CATEGORY_BADGE['その他']}`}
+              >
+                {g.category}
+              </span>
+            </div>
+            <div className="space-y-1">
+              {g.items.map((it) => (
+                <div
+                  key={it.key}
+                  className={`flex items-center gap-2 rounded-lg bg-white px-2 py-1.5 shadow-sm ${
+                    it.selected ? '' : 'opacity-50'
+                  }`}
+                >
+                  {/* 選択 */}
+                  <input
+                    type="checkbox"
+                    checked={it.selected}
+                    onChange={(e) => patch(it.key, { selected: e.target.checked })}
+                    aria-label={`${it.name}を追加する`}
+                    className="h-5 w-5 shrink-0 accent-amber-500"
+                  />
+
+                  {/* 名前・使うレシピ */}
+                  <div className="min-w-0 flex-1 text-left">
+                    <div className="flex items-center gap-1">
+                      <span className="truncate text-sm font-medium text-gray-800">{it.name}</span>
+                      {it.inList && (
+                        <span className="shrink-0 rounded bg-amber-100 px-1 text-[10px] font-bold text-amber-700">
+                          リストにあり
+                        </span>
+                      )}
+                    </div>
+                    <div className="truncate text-[10px] leading-tight text-gray-400">
+                      {it.recipeNames.join('・')}
+                    </div>
+                  </div>
+
+                  {/* 数量（変更できる） */}
+                  <div className="flex shrink-0 items-center gap-1">
+                    {(it.unit === '大さじ' || it.unit === '小さじ') && (
+                      <span className="text-xs text-gray-500">{it.unit}</span>
+                    )}
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={it.qty}
+                      onChange={(e) => patch(it.key, { qty: e.target.value })}
+                      placeholder="適量"
+                      aria-label={`${it.name}の数量`}
+                      className="w-16 rounded-md border border-gray-300 px-1.5 py-1 text-right text-sm focus:border-amber-500 focus:outline-none"
+                    />
+                    {it.unit && it.unit !== '大さじ' && it.unit !== '小さじ' && (
+                      <span className="w-6 text-xs text-gray-500">{it.unit}</span>
+                    )}
+                  </div>
+
+                  {/* 削除（この追加分から外す） */}
+                  <button
+                    onClick={() => remove(it.key)}
+                    aria-label={`${it.name}を削除`}
+                    className="shrink-0 rounded-full px-2 py-1 text-base leading-none text-gray-400 active:bg-gray-100"
+                  >
+                    🗑
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+
+      {/* 下部：確定 */}
+      <div
+        className="border-t border-gray-200 bg-white px-3 pt-2"
+        style={{ paddingBottom: 'calc(0.5rem + env(safe-area-inset-bottom))' }}
+      >
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            disabled={saving}
+            className="flex-1 rounded-lg border border-gray-300 bg-white py-2.5 text-sm font-bold text-gray-600 disabled:opacity-50"
+          >
+            キャンセル
+          </button>
+          <button
+            onClick={confirm}
+            disabled={saving || selectedCount === 0}
+            className="flex-[2] rounded-lg bg-amber-500 py-2.5 text-sm font-bold text-white disabled:opacity-40"
+          >
+            {saving ? '追加中…' : `確定して買い物リストへ追加（${selectedCount}件）`}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+..
+
+===== src\components\ShoppingCategoryOrderSettings.tsx =====
+..
+// src/components/ShoppingCategoryOrderSettings.tsx（新規作成）
+// 設定画面の「買い物リストのカテゴリ順」（▲▼で入れ替え。変更するとすぐ保存される）
+import { useEffect, useState } from 'react'
+import { useOutletContext } from 'react-router-dom'
+import type { Session } from '@supabase/supabase-js'
+import { CATEGORY_BADGE, DEFAULT_CATEGORY_ORDER, normalizeCategoryOrder } from '../lib/categoryOrder'
+import { fetchCategoryOrder, getHouseholdId, saveCategoryOrder } from '../lib/household'
+import { errorText } from '../lib/errorText'
+
+export default function ShoppingCategoryOrderSettings() {
+  const { session } = useOutletContext<{ session: Session }>()
+  const [householdId, setHouseholdId] = useState<string | null>(null)
+  const [order, setOrder] = useState<string[]>(normalizeCategoryOrder(null))
+  const [loading, setLoading] = useState(true)
+  const [status, setStatus] = useState<string | null>(null)
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const id = await getHouseholdId(session.user.id)
+        setHouseholdId(id)
+        setOrder(await fetchCategoryOrder(id))
+      } catch (e) {
+        setStatus('読み込みに失敗しました：' + errorText(e))
+      } finally {
+        setLoading(false)
+      }
+    })()
+  }, [session.user.id])
+
+  // 変更してすぐ保存（失敗したら元の順に戻す）
+  const save = async (next: string[]) => {
+    if (!householdId) return
+    const prev = order
+    setOrder(next)
+    setStatus('保存中…')
+    try {
+      await saveCategoryOrder(householdId, next)
+      setStatus('保存しました')
+    } catch (e) {
+      setOrder(prev)
+      setStatus('保存に失敗しました：' + errorText(e))
+    }
+  }
+
+  const move = (i: number, dir: -1 | 1) => {
+    const j = i + dir
+    if (j < 0 || j >= order.length) return
+    const next = [...order]
+    ;[next[i], next[j]] = [next[j], next[i]]
+    void save(next)
+  }
+
+  const reset = () => {
+    if (!window.confirm('カテゴリ順を初期の順（野菜→肉→魚介→乳製品・卵→調味料→…）に戻しますか？')) return
+    void save([...DEFAULT_CATEGORY_ORDER])
+  }
+
+  return (
+    <section className="mb-6 rounded-xl bg-white p-4 shadow-sm">
+      <h2 className="text-sm font-bold text-gray-900">🛒 買い物リストのカテゴリ順</h2>
+      <p className="mt-1 text-[11px] leading-relaxed text-gray-400">
+        新しく追加する材料は、この順に並びます。すでにあるリストを並べ直すときは、買い物リストの「並べ替え」→「自動配置」を使ってください。
+      </p>
+
+      {loading ? (
+        <div className="mt-3 space-y-1.5">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="h-9 animate-pulse rounded-lg bg-gray-100" />
+          ))}
+        </div>
+      ) : (
+        <ol className="mt-3 space-y-1.5">
+          {order.map((c, i) => (
+            <li key={c} className="flex items-center gap-2 rounded-lg border border-gray-100 px-2 py-1.5">
+              <span className="w-5 text-center text-xs font-bold text-gray-400">{i + 1}</span>
+              <span className={`rounded px-2 py-0.5 text-xs font-bold ${CATEGORY_BADGE[c] ?? CATEGORY_BADGE['その他']}`}>
+                {c}
+              </span>
+              <span className="ml-auto flex gap-1">
+                <button
+                  onClick={() => move(i, -1)}
+                  disabled={i === 0}
+                  aria-label={`${c}を上へ`}
+                  className="h-8 w-8 rounded-md border border-gray-300 text-sm text-gray-600 active:bg-gray-100 disabled:opacity-30"
+                >
+                  ▲
+                </button>
+                <button
+                  onClick={() => move(i, 1)}
+                  disabled={i === order.length - 1}
+                  aria-label={`${c}を下へ`}
+                  className="h-8 w-8 rounded-md border border-gray-300 text-sm text-gray-600 active:bg-gray-100 disabled:opacity-30"
+                >
+                  ▼
+                </button>
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      <div className="mt-3 flex items-center justify-between">
+        <span className="min-w-0 truncate text-[11px] text-gray-400">{status}</span>
+        <button
+          onClick={reset}
+          disabled={loading}
+          className="shrink-0 rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 disabled:opacity-40"
+        >
+          初期の順に戻す
+        </button>
+      </div>
+    </section>
+  )
+}
+..
+
+===== src\components\SwipeRow.tsx =====
+..
+// src/components/SwipeRow.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 左右にスワイプできる行。離したときに一定以上動いていたら、その向きの操作を実行する。
+//   左スワイプ（指を右→左）… onSwipeLeft  を実行（右側にラベルが現れる）
+//   右スワイプ（指を左→右）… onSwipeRight を実行（左側にラベルが現れる）
+// 使わない向きは省略できます（その向きには動きません）。
+// ・縦スクロールを邪魔しない（横の動きがはっきり大きいときだけ反応）
+// ・スワイプ直後のタップで、リンク先へ飛ばないようにする
+// ・iPhoneの「画面の左端から右へスワイプ＝戻る」と重ならないよう、左端24pxからの右スワイプは無視
+// ・disabled を true にすると、スワイプを一時的に無効にできる（長押しドラッグ中など）
+import { useRef, useState } from 'react'
+
+export type SwipeAction = {
+  label: string // 通常時のラベル
+  readyLabel: string // 十分に引いたとき（離せば実行される）のラベル
+  className: string // 背景色（Tailwind）。例: 'bg-red-500'
+}
+
+const ACTION_W = 104 // 現れる操作エリアの幅(px)
+const COMMIT_W = 72 // これ以上動かして離すと実行(px)
+const EDGE_GUARD = 24 // 画面の左端から、この範囲で始まったタッチは右スワイプとして扱わない(px)
+
+export default function SwipeRow({
+  left,
+  right,
+  onSwipeLeft,
+  onSwipeRight,
+  disabled,
+  children,
+}: {
+  left?: SwipeAction // 左スワイプしたとき（右側）に出す表示
+  right?: SwipeAction // 右スワイプしたとき（左側）に出す表示
+  onSwipeLeft?: () => void
+  onSwipeRight?: () => void
+  disabled?: boolean
+  children: React.ReactNode
+}) {
+  const [dx, setDx] = useState(0)
+  const [dragging, setDragging] = useState(false)
+  const startRef = useRef<{ x: number; y: number } | null>(null)
+  const axisRef = useRef<'h' | 'v' | null>(null)
+  const movedRef = useRef(false)
+
+  const canLeft = !!onSwipeLeft
+  const canRight = !!onSwipeRight
+
+  const reset = () => {
+    startRef.current = null
+    axisRef.current = null
+    setDragging(false)
+    setDx(0)
+  }
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (disabled) return
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    startRef.current = { x: e.clientX, y: e.clientY }
+    axisRef.current = null
+    movedRef.current = false
+  }
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (disabled) return
+    const s = startRef.current
+    if (!s) return
+    const mx = e.clientX - s.x
+    const my = e.clientY - s.y
+
+    // 向きが決まるまで様子を見る。縦のほうが大きければ、スワイプとは扱わない（縦スクロール優先）
+    if (axisRef.current === null) {
+      if (Math.abs(mx) < 8 && Math.abs(my) < 8) return
+      const horizontal = Math.abs(mx) > Math.abs(my) * 1.5
+      const okDir =
+        (mx < 0 && canLeft) || (mx > 0 && canRight && !(e.pointerType === 'touch' && s.x < EDGE_GUARD))
+      if (horizontal && okDir) {
+        axisRef.current = 'h'
+        setDragging(true)
+        e.currentTarget.setPointerCapture(e.pointerId)
+      } else {
+        axisRef.current = 'v'
+        startRef.current = null
+        return
+      }
+    }
+
+    if (axisRef.current === 'h') {
+      movedRef.current = true
+      const min = canLeft ? -ACTION_W : 0
+      const max = canRight ? ACTION_W : 0
+      setDx(Math.max(min, Math.min(max, mx)))
+    }
+  }
+
+  const onPointerUp = () => {
+    const wasHorizontal = axisRef.current === 'h'
+    const current = dx
+    reset()
+    if (!wasHorizontal) return
+    if (current <= -COMMIT_W) onSwipeLeft?.()
+    else if (current >= COMMIT_W) onSwipeRight?.()
+  }
+
+  // スワイプしたあとの「指を離した瞬間のタップ」で詳細画面へ飛ばないようにする
+  const onClickCapture = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (movedRef.current) {
+      e.preventDefault()
+      e.stopPropagation()
+      movedRef.current = false
+    }
+  }
+
+  const showLeftAction = dx < 0 && left // 左へ動かしている → 右側に left を表示
+  const showRightAction = dx > 0 && right // 右へ動かしている → 左側に right を表示
+
+  return (
+    <div className="relative select-none overflow-hidden rounded-xl">
+      {/* 背面（右側）：左スワイプで現れる */}
+      {showLeftAction && left && (
+        <div
+          className={`absolute inset-y-0 right-0 flex items-center justify-center px-1 text-center text-sm font-bold leading-tight text-white ${left.className}`}
+          style={{ width: ACTION_W }}
+        >
+          {dx <= -COMMIT_W ? left.readyLabel : left.label}
+        </div>
+      )}
+      {/* 背面（左側）：右スワイプで現れる */}
+      {showRightAction && right && (
+        <div
+          className={`absolute inset-y-0 left-0 flex items-center justify-center px-1 text-center text-sm font-bold leading-tight text-white ${right.className}`}
+          style={{ width: ACTION_W }}
+        >
+          {dx >= COMMIT_W ? right.readyLabel : right.label}
+        </div>
+      )}
+
+      {/* 前面：カード本体（縦スクロールはブラウザに任せ、横の動きだけ受け取る） */}
+      <div
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={reset}
+        onClickCapture={onClickCapture}
+        onDragStart={(e) => e.preventDefault()}
+        className="relative bg-white"
+        style={{
+          transform: `translateX(${dx}px)`,
+          transition: dragging ? 'none' : 'transform 0.2s ease-out',
+          touchAction: 'pan-y',
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  )
+}
+..
+
 ===== src\data\nutrientInfo.ts =====
 ..
 
@@ -620,8 +1268,588 @@ export function getNutrientInfo(key: keyof IngredientMaster) {
   return NUTRIENT_INFO_LIST.find((n) => n.key === key) ?? null;
 }
 
+..
 
-echo ..
+===== src\lib\categoryOrder.ts =====
+..
+// src/lib/categoryOrder.ts（新規作成）
+// 買い物リストのカテゴリ順（設定画面で変更できる）に関する共通部品
+
+// 初期の並び順（材料マスタのカテゴリ8種）
+export const DEFAULT_CATEGORY_ORDER: string[] = [
+  '野菜',
+  '肉',
+  '魚介',
+  '乳製品・卵',
+  '調味料',
+  '穀物・麺',
+  'その他',
+  '日用品',
+]
+
+// 保存されている順を検証して整える（知らないカテゴリは捨て、足りないカテゴリは初期順で後ろに足す）
+export function normalizeCategoryOrder(saved: string[] | null | undefined): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const c of saved ?? []) {
+    if (DEFAULT_CATEGORY_ORDER.includes(c) && !seen.has(c)) {
+      seen.add(c)
+      out.push(c)
+    }
+  }
+  for (const c of DEFAULT_CATEGORY_ORDER) {
+    if (!seen.has(c)) out.push(c)
+  }
+  return out
+}
+
+// そのカテゴリが何番目か（知らないカテゴリは「その他」扱い）
+export function categoryRank(order: string[], category: string | null | undefined): number {
+  const i = order.indexOf(category ?? 'その他')
+  if (i !== -1) return i
+  const other = order.indexOf('その他')
+  return other !== -1 ? other : order.length
+}
+
+// カテゴリの見出し用の色
+export const CATEGORY_BADGE: Record<string, string> = {
+  野菜: 'bg-green-100 text-green-700',
+  肉: 'bg-red-100 text-red-700',
+  魚介: 'bg-blue-100 text-blue-700',
+  '乳製品・卵': 'bg-yellow-100 text-yellow-700',
+  調味料: 'bg-orange-100 text-orange-700',
+  '穀物・麺': 'bg-amber-100 text-amber-700',
+  その他: 'bg-gray-100 text-gray-700',
+  日用品: 'bg-purple-100 text-purple-700',
+}
+..
+
+===== src\lib\dates.ts =====
+..
+// src/lib/dates.ts（新規作成）
+// 日付まわりの共通部品（「作った日」の保存と表示に使う）
+
+const pad = (n: number) => String(n).padStart(2, '0')
+
+// 今日の日付を「2026-10-06」の形で返す（端末の現地時間。日本ならJST）
+export function todayLocal(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+// 「2026-10-06」→「2026/10/06（火）」
+// ※ new Date('2026-10-06') だとUTC扱いで日付がずれることがあるので、年月日を分解して作る
+export function formatCookedDate(ymd: string): string {
+  const m = ymd.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (!m) return ymd
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  const w = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()]
+  return `${m[1]}/${m[2]}/${m[3]}（${w}）`
+}
+..
+
+===== src\lib\dragReorder.ts =====
+..
+// src/lib/dragReorder.ts（新規作成）
+// 買い物リストの「長押しドラッグで並べ替え」の計算だけを切り出した部品（画面に依存しない）
+
+// ドラッグ中の行が、全行の何番目に入るか（動かしている行を除いた並びの中での位置 0〜）
+//   rects: 各行の位置（ページ全体での top と height）。動かす前の並び順
+//   t: 動かしている行の移動量（translateY）
+export function computeToIndex(rects: { id: string; top: number; height: number }[], dragId: string, t: number): number {
+  const me = rects.find((r) => r.id === dragId)
+  if (!me) return 0
+  const center = me.top + t + me.height / 2
+  let toIndex = 0
+  for (const r of rects) {
+    if (r.id !== dragId && r.top + r.height / 2 < center) toIndex++
+  }
+  return toIndex
+}
+
+// 動かしていない行が、場所を空けるためにずれる量（行の数 × (行の高さ＋すき間)）
+//   idx: その行の今の位置、from: 動かしている行の元の位置、toIndex: 動かしている行の行き先
+export function shiftSlots(idx: number, from: number, toIndex: number): number {
+  const k = idx < from ? idx : idx - 1 // 動かしている行を除いた並びでの位置
+  const newPos = k < toIndex ? k : k + 1 // 行き先が空くので、その位置以降は1つ後ろへ
+  return newPos - idx
+}
+
+export type SortPlan =
+  | { kind: 'none' }
+  | { kind: 'single'; value: number } // 動かした行の並び順だけを更新
+  | { kind: 'renumber'; orders: { id: string; sort_order: number }[] } // 全部振り直す
+
+// ドロップしたとき、並び順をどう保存するか
+//   list: いまの並び（並び順の小さい順）。動かした行を含む
+export function planSortOrder(list: { id: string; sort_order: number }[], id: string, toIndex: number): SortPlan {
+  const moved = list.find((i) => i.id === id)
+  if (!moved) return { kind: 'none' }
+  const others = list.filter((i) => i.id !== id)
+  const prev = others[toIndex - 1]
+  const next = others[toIndex]
+  if (!prev && !next) return { kind: 'none' }
+  if (!prev) return { kind: 'single', value: next.sort_order - 1000 }
+  if (!next) return { kind: 'single', value: prev.sort_order + 1000 }
+  if (next.sort_order - prev.sort_order > 1e-6) {
+    return { kind: 'single', value: (prev.sort_order + next.sort_order) / 2 }
+  }
+  // 前後の値が近すぎる／同じ → 全部振り直す
+  const ordered = [...others]
+  ordered.splice(toIndex, 0, moved)
+  return { kind: 'renumber', orders: ordered.map((it, i) => ({ id: it.id, sort_order: (i + 1) * 1000 })) }
+}
+..
+
+===== src\lib\errorText.ts =====
+..
+// src/lib/errorText.ts（新規作成）
+// どんな形のエラーでも、画面に出せる文字列にする
+export function errorText(e: unknown): string {
+  if (e instanceof Error) return e.message
+  if (typeof e === 'object' && e !== null && 'message' in e) {
+    return String((e as { message: unknown }).message)
+  }
+  return '不明なエラー'
+}
+..
+
+===== src\lib\household.ts =====
+..
+// src/lib/household.ts（新規作成）
+// 世帯（家族グループ）まわりのDB操作：世帯ID・買い物リストのID・カテゴリ順の読み書き
+import { supabase } from '../supabaseClient'
+import { normalizeCategoryOrder } from './categoryOrder'
+
+let cached: { userId: string; householdId: string } | null = null
+
+// ログイン中のユーザーが所属する世帯のIDを取得（1回取れたら覚えておく）
+export async function getHouseholdId(userId: string): Promise<string> {
+  if (cached && cached.userId === userId) return cached.householdId
+  const { data, error } = await supabase
+    .from('household_members')
+    .select('household_id')
+    .eq('user_id', userId)
+    .limit(1)
+  if (error) throw error
+  const id = data?.[0]?.household_id as string | undefined
+  if (!id) throw new Error('所属している世帯が見つかりませんでした')
+  cached = { userId, householdId: id }
+  return id
+}
+
+// 買い物リストの順（設定画面で変更）。未設定・読み込み失敗のときは初期の順
+export async function fetchCategoryOrder(householdId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('households')
+    .select('shopping_category_order')
+    .eq('id', householdId)
+    .maybeSingle()
+  if (error) {
+    console.error(error)
+    return normalizeCategoryOrder(null)
+  }
+  return normalizeCategoryOrder((data?.shopping_category_order as string[] | null) ?? null)
+}
+
+export async function saveCategoryOrder(householdId: string, order: string[]): Promise<void> {
+  const { data, error } = await supabase
+    .from('households')
+    .update({ shopping_category_order: order })
+    .eq('id', householdId)
+    .select('id')
+  if (error) throw error
+  if (!data || data.length === 0) throw new Error('保存できませんでした（権限を確認してください）')
+}
+
+// 買い物リスト（世帯に1つ）のIDを探す。無ければ null
+export async function findShoppingListId(householdId: string): Promise<string | null> {
+  const { data, error } = await supabase
+    .from('shopping_lists')
+    .select('id')
+    .eq('household_id', householdId)
+    .order('created_at', { ascending: true })
+    .limit(1)
+  if (error) throw error
+  return (data?.[0]?.id as string | undefined) ?? null
+}
+
+// 買い物リストのIDを取得。無ければ作る
+export async function getOrCreateShoppingListId(householdId: string, userId: string): Promise<string> {
+  const found = await findShoppingListId(householdId)
+  if (found) return found
+  const { data, error } = await supabase
+    .from('shopping_lists')
+    .insert({ household_id: householdId, title: '買い物リスト', created_by: userId })
+    .select('id')
+    .single()
+  if (error) throw error
+  return data.id as string
+}
+..
+
+===== src\lib\shoppingAggregate.ts =====
+..
+// src/lib/shoppingAggregate.ts（新規作成）
+// 確定した献立の材料を、買い物用に合計する（画面に依存しない計算だけの部品）
+//   ・同じ材料は合算（例：玉ねぎ 200g ＋ 100g → 300g）
+//   ・人数に合わせて分量を増減（レシピの元の人数 → 選んだ人数）
+//   ・単位が違うときは、材料マスタの「既定の単位」と「1単位の重さ」で換算して合算できる場合だけ合算
+//     （換算できなければ、単位ごとに別の行にする）
+//   ・「適量」「少々」などは、数量がある行があれば無視。なければ「適量」の1行にする
+
+export type RawIngredient = {
+  recipe_id: string
+  ingredient_master_id: string | null
+  ingredient_name: string
+  quantity: string | null
+  unit: string | null
+  master: {
+    ingredient_name: string
+    category: string
+    default_unit: string | null
+    unit_weight_g: number | null
+  } | null
+}
+
+export type RecipeInfo = { id: string; dish_name: string; servings: number }
+
+export type AggItem = {
+  key: string // 画面内で行を区別するためのキー
+  masterId: string | null
+  name: string
+  category: string
+  quantity: string | null // 数値か「適量」などの文字
+  unit: string | null
+  recipeNames: string[]
+  recipeIds: string[]
+}
+
+// ---------- 小さな部品 ----------
+
+// 分量(text)を数値に変換："2" "0.5" "1/2" に対応。それ以外は null
+export function parseQty(t: string | null | undefined): number | null {
+  if (t == null) return null
+  const s = t.trim()
+  if (/^[0-9]+(\.[0-9]+)?$/.test(s)) return Number(s)
+  const m = s.match(/^([0-9]+)\/([0-9]+)$/)
+  if (m && Number(m[2]) !== 0) return Number(m[1]) / Number(m[2])
+  return null
+}
+
+// 「少々・適量・適宜・ひとつまみ」や空欄
+export function isNegligible(quantity: string | null | undefined): boolean {
+  const q = (quantity ?? '').trim()
+  return q === '' || /^(少々|適量|適宜|ひとつまみ)/.test(q)
+}
+
+// グラムの表記ゆれをそろえる
+export function normUnit(unit: string | null | undefined): string | null {
+  if (unit == null) return null
+  const u = unit.trim()
+  if (u === '') return null
+  if (u === 'ｇ' || u === 'グラム') return 'g'
+  return u
+}
+
+// 見やすい桁数に丸めて、文字列にする（0.75 / 12.5 / 300）
+export function roundQty(v: number): string {
+  const r = v >= 100 ? Math.round(v) : v >= 10 ? Math.round(v * 10) / 10 : Math.round(v * 100) / 100
+  return String(r)
+}
+
+// 「大さじ3」「小さじ1」は単位が先頭、それ以外は数量が先頭（300g・2個）
+export function formatAmount(quantity: string | null, unit: string | null): string {
+  const q = quantity ?? ''
+  const u = unit ?? ''
+  if (u === '大さじ' || u === '小さじ') return `${u}${q}`
+  return `${q}${u}`
+}
+
+// 同じ材料かどうかを判定するキー（マスタに紐付いていれば id、なければ名前）
+export function itemKeyOf(masterId: string | null, name: string): string {
+  return masterId ?? `name:${name}`
+}
+
+// ---------- 合計の本体 ----------
+
+type Line = {
+  recipe: RecipeInfo
+  qty: number | null // 人数換算後の数量（数値でなければ null）
+  unit: string | null
+  text: string | null // 元の分量の文字
+  negligible: boolean
+}
+
+type Group = {
+  itemKey: string
+  masterId: string | null
+  name: string
+  category: string
+  master: RawIngredient['master']
+  lines: Line[]
+}
+
+function uniq<T>(arr: T[]): T[] {
+  return Array.from(new Set(arr))
+}
+
+function buildItems(g: Group): AggItem[] {
+  const recipeNames = uniq(g.lines.map((l) => l.recipe.dish_name))
+  const recipeIds = uniq(g.lines.map((l) => l.recipe.id))
+  const base = { masterId: g.masterId, name: g.name, category: g.category, recipeNames, recipeIds }
+  const items: AggItem[] = []
+  let n = 0
+  const push = (quantity: string | null, unit: string | null) => {
+    items.push({ ...base, key: `${g.itemKey}#${n++}`, quantity, unit })
+  }
+
+  const numeric = g.lines.filter((l) => l.qty != null)
+  const others = g.lines.filter((l) => l.qty == null)
+
+  if (numeric.length > 0) {
+    const units = uniq(numeric.map((l) => l.unit))
+    if (units.length === 1) {
+      // 単位が全部同じ → そのまま合算
+      push(roundQty(numeric.reduce((s, l) => s + (l.qty as number), 0)), units[0])
+    } else {
+      // 単位がばらばら → マスタの既定の単位に換算できるなら合算
+      const du = normUnit(g.master?.default_unit)
+      const w = g.master?.unit_weight_g ?? null
+      const convertible =
+        du != null && numeric.every((l) => l.unit === 'g' || (l.unit === du && w != null && w > 0))
+      if (convertible && du != null) {
+        const grams = numeric.reduce(
+          (s, l) => s + (l.unit === 'g' ? (l.qty as number) : (l.qty as number) * (w as number)),
+          0,
+        )
+        const q = du === 'g' ? grams : grams / (w as number)
+        push(roundQty(q), du)
+      } else {
+        // 換算できない → 単位ごとに別の行
+        for (const u of units) {
+          const sum = numeric.filter((l) => l.unit === u).reduce((s, l) => s + (l.qty as number), 0)
+          push(roundQty(sum), u)
+        }
+      }
+    }
+    // 数値にできない分量（「2〜3」など）。「適量」系は数量があるので無視
+    const seen = new Set<string>()
+    for (const l of others) {
+      if (l.negligible) continue
+      const k = `${l.text}|${l.unit}`
+      if (seen.has(k)) continue
+      seen.add(k)
+      push(l.text, l.unit)
+    }
+  } else if (others.length > 0) {
+    // 数量がある行がない → 「適量」など文字の分量を1行にする
+    const real = others.find((l) => !l.negligible)
+    const text = (real?.text ?? others[0].text ?? '').trim()
+    push(text === '' ? '適量' : text, real ? real.unit : null)
+  }
+  return items
+}
+
+export function aggregateIngredients(
+  raws: RawIngredient[],
+  recipes: RecipeInfo[],
+  servings: number,
+): AggItem[] {
+  const recipeMap = new Map(recipes.map((r) => [r.id, r]))
+  const groups = new Map<string, Group>()
+
+  for (const raw of raws) {
+    const recipe = recipeMap.get(raw.recipe_id)
+    if (!recipe) continue
+    const factor = recipe.servings > 0 ? servings / recipe.servings : 1
+    const itemKey = itemKeyOf(raw.ingredient_master_id, raw.ingredient_name)
+
+    let g = groups.get(itemKey)
+    if (!g) {
+      g = {
+        itemKey,
+        masterId: raw.ingredient_master_id,
+        name: raw.master?.ingredient_name ?? raw.ingredient_name,
+        category: raw.master?.category ?? 'その他',
+        master: raw.master,
+        lines: [],
+      }
+      groups.set(itemKey, g)
+    }
+
+    const q = parseQty(raw.quantity)
+    g.lines.push({
+      recipe,
+      qty: q != null ? q * factor : null,
+      unit: normUnit(raw.unit),
+      text: raw.quantity,
+      negligible: isNegligible(raw.quantity),
+    })
+  }
+
+  const out: AggItem[] = []
+  for (const g of groups.values()) out.push(...buildItems(g))
+  return out
+}
+..
+
+===== src\lib\shoppingList.ts =====
+..
+// src/lib/shoppingList.ts（新規作成）
+// 買い物リストへ材料を追加する処理
+//   ・すでにリストにある（未購入の）同じ材料・同じ単位は、数量を足して1行にまとめる
+//   ・新しい材料は、カテゴリ順（設定画面の順）に合う位置に自動で差し込む
+import { supabase } from '../supabaseClient'
+import { fetchCategoryOrder, getHouseholdId, getOrCreateShoppingListId } from './household'
+import { computeSortOrders } from './shoppingOrder'
+import { itemKeyOf, normUnit, parseQty, roundQty } from './shoppingAggregate'
+
+export type NewShoppingItem = {
+  masterId: string | null
+  name: string
+  category: string
+  quantity: string | null
+  unit: string | null
+  note: string | null // どのレシピ用か
+  recipeId: string | null // 1つのレシピ用のときだけ
+}
+
+type ExistingRow = {
+  id: string
+  ingredient_master_id: string | null
+  item_name: string
+  quantity: string | null
+  unit: string | null
+  category: string
+  sort_order: number
+  is_checked: boolean
+}
+
+export async function addItemsToShoppingList(params: {
+  userId: string
+  items: NewShoppingItem[]
+}): Promise<{ inserted: number; merged: number }> {
+  const { userId, items } = params
+  const householdId = await getHouseholdId(userId)
+  const listId = await getOrCreateShoppingListId(householdId, userId)
+  const order = await fetchCategoryOrder(householdId)
+
+  const { data, error } = await supabase
+    .from('shopping_items')
+    .select('id, ingredient_master_id, item_name, quantity, unit, category, sort_order, is_checked')
+    .eq('shopping_list_id', listId)
+  if (error) throw error
+  const open = ((data ?? []) as ExistingRow[]).filter((e) => !e.is_checked) // 未購入だけが対象
+
+  // ① 既にある同じ材料（同じ単位）には数量を足す。それ以外は新しい行にする
+  const toInsert: NewShoppingItem[] = []
+  const updates = new Map<string, string>() // id → 新しい数量
+  for (const it of items) {
+    const key = itemKeyOf(it.masterId, it.name)
+    const unit = normUnit(it.unit)
+    const match = open.find(
+      (e) => itemKeyOf(e.ingredient_master_id, e.item_name) === key && normUnit(e.unit) === unit,
+    )
+    const a = parseQty(match?.quantity)
+    const b = parseQty(it.quantity)
+    if (match && a != null && b != null) {
+      const sum = roundQty(a + b)
+      match.quantity = sum // 同じ行に2回足すときのため、手元の値も更新
+      updates.set(match.id, sum)
+    } else {
+      toInsert.push(it)
+    }
+  }
+
+  // ② 新しい行は、カテゴリ順に合う位置に自動で差し込む
+  const orders = computeSortOrders(
+    open.map((e) => ({ sort_order: e.sort_order, category: e.category })),
+    toInsert.map((i) => i.category),
+    order,
+  )
+
+  if (toInsert.length > 0) {
+    const rows = toInsert.map((it, i) => ({
+      shopping_list_id: listId,
+      ingredient_master_id: it.masterId,
+      recipe_id: it.recipeId,
+      item_name: it.name,
+      quantity: it.quantity,
+      unit: it.unit,
+      is_checked: false,
+      created_by: userId,
+      updated_by: userId,
+      category: it.category,
+      sort_order: orders[i],
+      note: it.note,
+    }))
+    const { error: insErr } = await supabase.from('shopping_items').insert(rows)
+    if (insErr) throw insErr
+  }
+
+  const results = await Promise.all(
+    Array.from(updates.entries()).map(([id, quantity]) =>
+      supabase.from('shopping_items').update({ quantity, updated_by: userId }).eq('id', id),
+    ),
+  )
+  const failed = results.find((r) => r.error)
+  if (failed?.error) throw failed.error
+
+  return { inserted: toInsert.length, merged: updates.size }
+}
+..
+
+===== src\lib\shoppingOrder.ts =====
+..
+// src/lib/shoppingOrder.ts（新規作成）
+// 買い物リストに新しい材料を足すときの「自動配置」の計算（画面に依存しない部品）
+//   ・新しい材料は、カテゴリ順（設定画面の順）に合う位置に差し込む
+//   ・既存の並び（手動で入れ替えた順も含む）は崩さない：前後の sort_order の真ん中の値を使う
+import { categoryRank } from './categoryOrder'
+
+export function computeSortOrders(
+  existing: { sort_order: number; category: string }[], // いま画面に出ている（未購入の）材料
+  newCategories: string[], // これから追加する材料のカテゴリ
+  order: string[], // カテゴリ順
+): number[] {
+  const working = existing
+    .map((e) => ({ s: e.sort_order, rank: categoryRank(order, e.category) }))
+    .sort((a, b) => a.s - b.s)
+
+  // カテゴリ順に並べて、1つずつ差し込む
+  const idxs = newCategories
+    .map((_, i) => i)
+    .sort((a, b) => categoryRank(order, newCategories[a]) - categoryRank(order, newCategories[b]) || a - b)
+
+  const result: number[] = new Array(newCategories.length).fill(0)
+
+  for (const i of idxs) {
+    const rank = categoryRank(order, newCategories[i])
+    // 「自分以下のカテゴリ順」の最後の材料の直後に入れる
+    let pos = -1
+    for (let k = working.length - 1; k >= 0; k--) {
+      if (working[k].rank <= rank) {
+        pos = k
+        break
+      }
+    }
+    const prev = pos >= 0 ? working[pos].s : null
+    const next = pos + 1 < working.length ? working[pos + 1].s : null
+
+    let s: number
+    if (prev == null && next == null) s = 1000
+    else if (prev == null) s = (next as number) - 1000
+    else if (next == null) s = prev + 1000
+    else s = (prev + next) / 2
+
+    result[i] = s
+    working.splice(pos + 1, 0, { s, rank })
+  }
+  return result
+}
+..
+
 ===== src\lib\supabaseStorage.ts =====
 ..
 // ファイル: src/lib/supabaseStorage.ts
@@ -646,8 +1874,8 @@ export async function getRecipeImageUrl(imagePath: string | null): Promise<strin
   }
 
   return data.signedUrl
-}
-echo ..
+}..
+
 ===== src\lib\useRecipeImage.ts =====
 ..
 // ファイル: src/lib/useRecipeImage.ts
@@ -677,8 +1905,37 @@ export function useRecipeImage(imagePath: string | null) {
   }, [imagePath])
 
   return url
+}..
+
+===== src\lib\useServings.ts =====
+..
+// src/lib/useServings.ts（新規作成）
+// 「何人前で表示するか」を、レシピ一覧・レシピ詳細・献立で共通に使うためのフック。
+// 選んだ人数は端末に保存され、次回も同じ人数で開きます（最初は1人前）。
+import { useState } from 'react'
+
+const KEY = 'kaimeshi.servings'
+export const MIN_SERVINGS = 1
+export const MAX_SERVINGS = 8
+
+function read(): number {
+  const v = Number(localStorage.getItem(KEY))
+  return Number.isInteger(v) && v >= MIN_SERVINGS && v <= MAX_SERVINGS ? v : 1
 }
-echo ..
+
+export function useServings(): [number, (n: number) => void] {
+  const [servings, setServings] = useState<number>(read)
+
+  const change = (n: number) => {
+    const next = Math.min(MAX_SERVINGS, Math.max(MIN_SERVINGS, Math.round(n)))
+    setServings(next)
+    localStorage.setItem(KEY, String(next))
+  }
+
+  return [servings, change]
+}
+..
+
 ===== src\pages\MasterPage.tsx =====
 ..
 // src/pages/MasterPage.tsx（ファイル全体。これで丸ごと置き換えてください）
@@ -1443,33 +2700,610 @@ function NutrientRow({
     </div>
   );
 }
+..
 
-echo ..
 ===== src\pages\MenuPage.tsx =====
 ..
-// ---------- src/pages/MenuPage.tsx ----------
+// src/pages/MenuPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 前提：09_menu_status_migration.sql（plan_confirmed 列）と 11_cook_logs_migration.sql（cook_logs テーブル）を実行済み
+// 献立画面：日割りなし。「確定」と「候補」の2つのリストを、小さな行（料理名＋引用元）で並べる（ボタンなし・スワイプで操作）
+//   【候補】 → 右スワイプ：確定に追加 ／ ← 左スワイプ：削除（献立から外す。レシピは残る）
+//   【確定】 → 右スワイプ：作った（作った回数 +1 ＋ 作った日付を履歴に保存。献立から外れる） ／ ← 左スワイプ：候補に戻す
+// 一番上（スクロールしても固定）：
+//   ・1食あたりの平均価格・平均カロリー（食事回数＝確定した「主菜」と「麺・丼・ワンプレート」の数）
+//   ・「🛒 買い物リストに追加」ボタン
+// 人数切替は「確定」見出しの右端（共通設定。一覧・詳細と同じ人数で表示）
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate, useOutletContext } from 'react-router-dom'
+import type { Session } from '@supabase/supabase-js'
+import { supabase } from '../supabaseClient'
+import type { Recipe as RecipeBase } from '../types/recipe'
+import SwipeRow from '../components/SwipeRow'
+import type { SwipeAction } from '../components/SwipeRow'
+import ServingsStepper from '../components/ServingsStepper'
+import ShoppingAddSheet from '../components/ShoppingAddSheet'
+import { useServings } from '../lib/useServings'
+import { getHouseholdId } from '../lib/household'
+import { todayLocal } from '../lib/dates'
+import { errorText } from '../lib/errorText'
+
+type Recipe = Pick<
+  RecipeBase,
+  | 'id'
+  | 'dish_name'
+  | 'servings'
+  | 'category'
+  | 'source_name'
+  | 'cooking_time_minutes'
+  | 'cook_count'
+  | 'is_planned'
+  | 'plan_confirmed'
+  | 'planned_by'
+  | 'planned_at'
+>
+
+type MenuRow = Recipe & {
+  kcal: number | null // 1人前あたり
+  price: number | null // 1人前あたり
+  unresolved: number
+}
+
+// 更新する列のまとまり（「元に戻す」では、操作前の値をそのまま書き戻す）
+type Patch = {
+  is_planned: boolean
+  plan_confirmed: boolean
+  planned_by: string | null
+  planned_at: string | null
+  cook_count: number
+}
+
+type Toast = { message: string; actionLabel: string; onAction: () => void }
+
+// 「1回の食事」として数えるサブカテゴリ（主菜と、麺・丼・ワンプレート）
+const MEAL_CATEGORIES = ['主菜', '麺・丼・ワンプレート']
+
+function roundSmart(value: number): number {
+  const abs = Math.abs(value)
+  if (abs === 0) return 0
+  if (abs >= 10) return Math.round(value)
+  if (abs >= 1) return Math.round(value * 10) / 10
+  return Math.round(value * 100) / 100
+}
+function fmtVal(value: number | null, unit: string): string {
+  if (value == null) return '―'
+  return `${roundSmart(value)}${unit}`
+}
+
+// 操作前の状態（元に戻す用）
+function snapshot(r: MenuRow): Patch {
+  return {
+    is_planned: r.is_planned,
+    plan_confirmed: r.plan_confirmed,
+    planned_by: r.planned_by,
+    planned_at: r.planned_at,
+    cook_count: r.cook_count,
+  }
+}
+
+// スワイプのラベル
+const ACT_CONFIRM: SwipeAction = { label: '✅ 確定', readyLabel: '離して確定', className: 'bg-green-600' }
+const ACT_DELETE: SwipeAction = { label: '削除', readyLabel: '離して削除', className: 'bg-red-500' }
+const ACT_COOKED: SwipeAction = { label: '🍳 作った', readyLabel: '離して作った', className: 'bg-amber-500' }
+const ACT_BACK: SwipeAction = { label: '↩ 候補に戻す', readyLabel: '離して戻す', className: 'bg-gray-500' }
+
 export default function MenuPage() {
+  const { session } = useOutletContext<{ session: Session }>()
+  const navigate = useNavigate()
+  const userId = session.user.id
+
+  const [rows, setRows] = useState<MenuRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [toast, setToast] = useState<Toast | null>(null)
+  const [servings, setServings] = useServings()
+  const [showAdd, setShowAdd] = useState(false) // 「買い物リストに追加」の確認画面
+
+  useEffect(() => {
+    ;(async () => {
+      const { data, error: recErr } = await supabase
+        .from('recipes')
+        .select(
+          'id, dish_name, servings, category, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at',
+        )
+        .eq('is_planned', true)
+
+      if (recErr) {
+        setError(recErr.message)
+        setLoading(false)
+        return
+      }
+
+      const recipes = (data ?? []) as Recipe[]
+      const ids = recipes.map((r) => r.id)
+
+      // カロリー・費用（材料マスタから計算した1人前あたり）。読めなくても献立自体は表示する
+      const nutrition = new Map<string, { kcal: number | null; price: number | null; unresolved: number }>()
+      if (ids.length > 0) {
+        const { data: nutData, error: nutErr } = await supabase
+          .from('recipe_nutrition')
+          .select('recipe_id, calorie_per_serving, price_per_serving, unresolved_count')
+          .in('recipe_id', ids)
+        if (nutErr) {
+          console.error(nutErr)
+        } else {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ;(nutData ?? []).forEach((n: any) => {
+            nutrition.set(String(n.recipe_id), {
+              kcal: typeof n.calorie_per_serving === 'number' ? n.calorie_per_serving : null,
+              price: typeof n.price_per_serving === 'number' ? n.price_per_serving : null,
+              unresolved: typeof n.unresolved_count === 'number' ? n.unresolved_count : 0,
+            })
+          })
+        }
+      }
+
+      setRows(
+        recipes.map((r) => {
+          const n = nutrition.get(r.id)
+          return { ...r, kcal: n?.kcal ?? null, price: n?.price ?? null, unresolved: n?.unresolved ?? 0 }
+        }),
+      )
+      setLoading(false)
+    })()
+  }, [])
+
+  // 「元に戻す」メッセージは5秒で自動的に消す
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 5000)
+    return () => clearTimeout(t)
+  }, [toast])
+
+  // DBを更新 → 成功したら画面に反映（失敗したら何も変えずにエラーを出す）
+  const applyPatch = async (id: string, patch: Patch): Promise<boolean> => {
+    const { data, error: updErr } = await supabase
+      .from('recipes')
+      .update(patch)
+      .eq('id', id)
+      .select('id')
+    if (updErr || !data || data.length === 0) {
+      alert('更新に失敗しました: ' + (updErr ? errorText(updErr) : '権限を確認してください'))
+      return false
+    }
+    setRows((list) => list.map((r) => (r.id === id ? { ...r, ...patch } : r)))
+    return true
+  }
+
+  const act = async (row: MenuRow, patch: Patch, message: string) => {
+    if (busy) return
+    setBusy(true)
+    const before = snapshot(row)
+    const ok = await applyPatch(row.id, patch)
+    setBusy(false)
+    if (!ok) return
+    setToast({
+      message,
+      actionLabel: '元に戻す',
+      onAction: () => {
+        void applyPatch(row.id, before)
+        setToast(null)
+      },
+    })
+  }
+
+  // ---- 各操作 ----
+  const confirm = (r: MenuRow) =>
+    act(r, { ...snapshot(r), plan_confirmed: true }, `「${r.dish_name}」を確定しました`)
+
+  const backToCandidate = (r: MenuRow) =>
+    act(r, { ...snapshot(r), plan_confirmed: false }, `「${r.dish_name}」を候補に戻しました`)
+
+  const removeFromMenu = (r: MenuRow) =>
+    act(
+      r,
+      { ...snapshot(r), is_planned: false, plan_confirmed: false, planned_by: null, planned_at: null },
+      `「${r.dish_name}」を献立から削除しました（レシピは残ります）`,
+    )
+
+  // 作った：作った日付を履歴（cook_logs）に保存 → 作った回数 +1 → 献立から外す
+  const markCooked = async (r: MenuRow) => {
+    if (busy) return
+    setBusy(true)
+    const before = snapshot(r)
+
+    // ① 作った日付を保存（先に保存。あとの更新に失敗したら、この履歴を消す）
+    let logId: string
+    try {
+      const householdId = await getHouseholdId(userId)
+      const { data, error: logErr } = await supabase
+        .from('cook_logs')
+        .insert({ household_id: householdId, recipe_id: r.id, cooked_on: todayLocal(), cooked_by: userId })
+        .select('id')
+        .single()
+      if (logErr) throw logErr
+      logId = (data as { id: string }).id
+    } catch (e) {
+      setBusy(false)
+      alert(
+        '作った日付の記録に失敗しました：' +
+          errorText(e) +
+          '\n（11_cook_logs_migration.sql を実行済みか確認してください）',
+      )
+      return
+    }
+
+    // ② 作った回数 +1、献立から外す
+    const ok = await applyPatch(r.id, {
+      is_planned: false,
+      plan_confirmed: false,
+      planned_by: null,
+      planned_at: null,
+      cook_count: r.cook_count + 1,
+    })
+    setBusy(false)
+    if (!ok) {
+      await supabase.from('cook_logs').delete().eq('id', logId)
+      return
+    }
+
+    setToast({
+      message: `「${r.dish_name}」を作りました（${r.cook_count + 1}回目）`,
+      actionLabel: '元に戻す',
+      onAction: () => {
+        void applyPatch(r.id, before)
+        void supabase.from('cook_logs').delete().eq('id', logId) // 履歴も取り消す
+        setToast(null)
+      },
+    })
+  }
+
+  // 確定／候補に分ける（追加した順に並べる。新しいものが上）
+  const { confirmed, candidates } = useMemo(() => {
+    const byPlanned = (a: MenuRow, b: MenuRow) => (b.planned_at ?? '').localeCompare(a.planned_at ?? '')
+    const planned = rows.filter((r) => r.is_planned)
+    return {
+      confirmed: planned.filter((r) => r.plan_confirmed).sort(byPlanned),
+      candidates: planned.filter((r) => !r.plan_confirmed).sort(byPlanned),
+    }
+  }, [rows])
+
+  // 1食あたりの平均（確定した料理ぜんぶの合計 ÷ 食事回数）。食事回数＝主菜と麺・丼・ワンプレートの数
+  const stats = useMemo(() => {
+    const meals = confirmed.filter((r) => r.category != null && MEAL_CATEGORIES.includes(r.category)).length
+    let totalKcal = 0
+    let totalPrice = 0
+    let uncertain = false
+    for (const r of confirmed) {
+      if (r.kcal != null) totalKcal += r.kcal * servings
+      else uncertain = true
+      if (r.price != null) totalPrice += r.price * servings
+      else uncertain = true
+      if (r.unresolved > 0) uncertain = true
+    }
+    return {
+      meals,
+      avgKcal: meals > 0 ? totalKcal / meals : null,
+      avgPrice: meals > 0 ? totalPrice / meals : null,
+      uncertain,
+    }
+  }, [confirmed, servings])
+
   return (
-    <div className="flex flex-col items-center justify-center pt-32 text-gray-400">
-      <div className="text-5xl">📅</div>
-      <p className="mt-3 font-bold">献立</p>
-      <p className="text-xs">準備中</p>
+    <div className="min-h-screen bg-gray-50 pb-6">
+      {/* 一番上（スクロールしても固定）：1食あたりの平均 ＋ 買い物リストに追加 */}
+      <div className="sticky top-0 z-40 border-b border-gray-200 bg-gray-50 px-2 pb-2 pt-2">
+        <div className="mb-1.5 flex items-center justify-between gap-2 px-1 text-xs text-gray-600">
+          <span className="shrink-0">
+            🍽 食事 <b className="text-gray-900">{stats.meals}</b>回
+          </span>
+          {stats.meals > 0 ? (
+            <span className="min-w-0 truncate text-right">
+              1食平均{' '}
+              <b className="text-gray-900">{fmtVal(stats.avgPrice, '円')}</b>
+              {' ・ '}
+              <b className="text-gray-900">{fmtVal(stats.avgKcal, 'kcal')}</b>
+              {stats.uncertain && <span className="text-amber-600">※</span>}
+              <span className="text-gray-400">（{servings}人前）</span>
+            </span>
+          ) : (
+            <span className="min-w-0 truncate text-right text-gray-400">
+              1食平均 ―（確定した主菜・麺・丼がありません）
+            </span>
+          )}
+        </div>
+        <button
+          onClick={() => setShowAdd(true)}
+          disabled={confirmed.length === 0}
+          className="w-full rounded-lg bg-amber-500 py-2.5 text-sm font-bold text-white shadow-sm active:opacity-80 disabled:bg-gray-300"
+        >
+          {confirmed.length === 0
+            ? '🛒 買い物リストに追加（確定した料理がありません）'
+            : `🛒 買い物リストに追加（確定 ${confirmed.length}品）`}
+        </button>
+      </div>
+
+      {error && <p className="p-4 text-sm text-red-600">読み込みエラー：{error}</p>}
+
+      {loading ? (
+        <div className="space-y-1.5 p-2">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="h-12 animate-pulse rounded-lg bg-gray-200" />
+          ))}
+        </div>
+      ) : (
+        <div className="px-2 pt-2">
+          {/* 確定（見出しの右端に人数切替） */}
+          <SectionTitle
+            icon="✅"
+            title="確定"
+            count={confirmed.length}
+            hint="→作った ←戻す"
+            trailing={<ServingsStepper value={servings} onChange={setServings} />}
+          />
+          {confirmed.length === 0 ? (
+            <Empty text="確定した料理はありません（候補を右にスワイプ）" />
+          ) : (
+            <div className="space-y-1">
+              {confirmed.map((r) => (
+                <SwipeRow
+                  key={r.id}
+                  right={ACT_COOKED}
+                  left={ACT_BACK}
+                  onSwipeRight={() => markCooked(r)}
+                  onSwipeLeft={() => backToCandidate(r)}
+                >
+                  <MenuLine row={r} servings={servings} />
+                </SwipeRow>
+              ))}
+            </div>
+          )}
+
+          {/* 候補 */}
+          <div className="mt-4" />
+          <SectionTitle icon="💭" title="候補" count={candidates.length} hint="→確定 ←削除" />
+          {candidates.length === 0 ? (
+            <Empty text="候補はありません（レシピ一覧で右スワイプ／＋で追加）" />
+          ) : (
+            <div className="space-y-1">
+              {candidates.map((r) => (
+                <SwipeRow
+                  key={r.id}
+                  right={ACT_CONFIRM}
+                  left={ACT_DELETE}
+                  onSwipeRight={() => confirm(r)}
+                  onSwipeLeft={() => removeFromMenu(r)}
+                >
+                  <MenuLine row={r} servings={servings} />
+                </SwipeRow>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 買い物リストに追加の確認画面（全画面） */}
+      {showAdd && (
+        <ShoppingAddSheet
+          recipes={confirmed.map((r) => ({ id: r.id, dish_name: r.dish_name, servings: r.servings }))}
+          servings={servings}
+          userId={userId}
+          onClose={() => setShowAdd(false)}
+          onAdded={(count) => {
+            setShowAdd(false)
+            setToast({
+              message: `${count}件を買い物リストに追加しました`,
+              actionLabel: '見る',
+              onAction: () => {
+                setToast(null)
+                navigate('/shopping')
+              },
+            })
+          }}
+        />
+      )}
+
+      {/* 操作のあとに出るメッセージ */}
+      {toast && (
+        <div
+          className="pointer-events-none fixed inset-x-0 z-50 flex justify-center px-3"
+          style={{ bottom: 'calc(4.5rem + env(safe-area-inset-bottom))' }}
+        >
+          <div className="pointer-events-auto flex max-w-md items-center gap-3 rounded-xl bg-gray-900 px-4 py-2.5 text-sm text-white shadow-lg">
+            <span className="min-w-0 flex-1 truncate">{toast.message}</span>
+            <button onClick={toast.onAction} className="shrink-0 font-bold text-amber-300">
+              {toast.actionLabel}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
-echo ..
+
+function SectionTitle({
+  icon,
+  title,
+  count,
+  hint,
+  trailing,
+}: {
+  icon: string
+  title: string
+  count: number
+  hint: string
+  trailing?: React.ReactNode // 右端に置く部品（人数切替など）
+}) {
+  return (
+    <div className="mb-1 flex items-center gap-1.5 px-1">
+      <h2 className="shrink-0 text-sm font-bold text-gray-900">
+        {icon} {title}
+      </h2>
+      <span className="shrink-0 rounded-full bg-gray-200 px-1.5 text-[11px] font-semibold text-gray-600">{count}</span>
+      <span className="ml-auto min-w-0 truncate text-[10px] text-gray-400">{hint}</span>
+      {trailing}
+    </div>
+  )
+}
+
+function Empty({ text }: { text: string }) {
+  return (
+    <p className="rounded-lg border border-dashed border-gray-300 bg-white px-3 py-3 text-center text-[11px] text-gray-400">
+      {text}
+    </p>
+  )
+}
+
+// ---------- 献立の1行（コンパクト：料理名＋引用元の2段／右に人数ぶんのカロリー・費用） ----------
+function MenuLine({ row: r, servings }: { row: MenuRow; servings: number }) {
+  const kcal = r.kcal != null ? r.kcal * servings : null
+  const price = r.price != null ? r.price * servings : null
+  return (
+    <Link
+      to={`/recipes/${r.id}`}
+      draggable={false}
+      className="flex items-center gap-2 px-3 py-1.5 active:opacity-70"
+    >
+      {/* 左：①料理名 ②引用元（左揃え。長いときは省略） */}
+      <div className="min-w-0 flex-1 text-left">
+        <div className="truncate text-sm font-medium leading-tight text-gray-800">
+          {r.dish_name}
+          {r.unresolved > 0 && <span className="ml-1 text-[10px] font-normal text-amber-600">※</span>}
+        </div>
+        {r.source_name && <div className="truncate text-[11px] leading-tight text-gray-400">{r.source_name}</div>}
+      </div>
+
+      {/* 右：人数ぶんのカロリー・費用 */}
+      <span className="shrink-0 whitespace-nowrap text-xs font-semibold text-gray-700">
+        {fmtVal(kcal, 'kcal')}　{fmtVal(price, '円')}
+      </span>
+    </Link>
+  )
+}
+..
+
 ===== src\pages\RecipeDetailPage.tsx =====
 ..
-// ファイル: src/pages/RecipeDetailPage.tsx
-// レシピ詳細画面:写真・基本情報・材料・工程・「作る予定」トグル
-
-import { useEffect, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
-import { useOutletContext } from 'react-router-dom'
+// src/pages/RecipeDetailPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 前提：recipe_nutrition ビュー（01）、recipes.plan_confirmed 列（09）、cook_logs テーブル（11）を作成済みであること
+// 今回の変更：
+//  ・「🍳 作った履歴」を追加。献立で「作った」にした日付が、新しい順に並ぶ（11 を実行した後の分から）
+// これまでの内容：
+//  ・人数を変えられる（「－ 2人前 ＋」。レシピ一覧・献立と共通の設定）。カロリー・費用・栄養素・材料の分量が連動
+//  ・献立候補トグル（未追加／候補／確定）。追加は「候補」から。確定・作ったは献立画面で行う
+//  ・カロリー／費用／栄養素は recipe_nutrition ビュー（材料マスタから計算）から表示
+//  ・計算できていない材料には「未計算」マーク
+//  ・分量は「大さじ3」のように、大さじ・小さじは単位を先頭に表示
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate, useOutletContext, useParams } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../supabaseClient'
 import type { Ingredient, Recipe, Step } from '../types/recipe'
+import type { CookLog } from '../types/cookLog'
 import { useRecipeImage } from '../lib/useRecipeImage'
+import { formatCookedDate } from '../lib/dates'
+import { NUTRIENT_INFO_LIST } from '../data/nutrientInfo'
+import type { NutrientInfo } from '../data/nutrientInfo'
+import ServingsStepper from '../components/ServingsStepper'
+import { useServings } from '../lib/useServings'
+
+// 材料 ＋ 紐付いたマスタの単位情報（未計算の判定に使う）
+type IngredientRow = Ingredient & {
+  ingredient_master: { default_unit: string | null; unit_weight_g: number | null } | null
+}
+
+// recipe_nutrition ビューの1行
+type NutritionRow = Record<string, number | string | null>
+
+const LOG_PREVIEW = 10 // 作った履歴は、最初は新しい順に10件だけ表示
+
+// ---------- 計算ルール（SQLビュー 01_recipe_nutrition_view.sql と同じ） ----------
+
+// 分量(text)を数値に変換："2" "0.5" "1/2" に対応。それ以外は null
+function parseQty(t: string | null): number | null {
+  if (t == null) return null
+  const s = t.trim()
+  if (/^[0-9]+(\.[0-9]+)?$/.test(s)) return Number(s)
+  const m = s.match(/^([0-9]+)\/([0-9]+)$/)
+  if (m && Number(m[2]) !== 0) return Number(m[1]) / Number(m[2])
+  return null
+}
+
+// 「少々・適量・適宜・ひとつまみ」や空欄は、計算対象外（未計算に数えない）
+function isNegligible(quantity: string | null): boolean {
+  const q = (quantity ?? '').trim()
+  return q === '' || /^(少々|適量|適宜|ひとつまみ)/.test(q)
+}
+
+// この材料がマスタから計算できているか
+function isResolved(ing: IngredientRow): boolean {
+  const m = ing.ingredient_master
+  if (!ing.ingredient_master_id || !m) return false
+  if (parseQty(ing.quantity) == null) return false
+  if (ing.unit != null && ['g', 'ｇ', 'グラム'].includes(ing.unit)) return true
+  return m.default_unit != null && ing.unit === m.default_unit && m.unit_weight_g != null
+}
+
+// ---------- 表示用ヘルパー ----------
+
+// 分量の表示：「大さじ」「小さじ」は単位が先頭（大さじ3）、それ以外は数量が先頭（300g・2個）
+function formatAmount(quantity: string | null, unit: string | null): string {
+  const q = quantity ?? ''
+  const u = unit ?? ''
+  if (u === '大さじ' || u === '小さじ') return `${u}${q}`
+  return `${q}${u}`
+}
+
+// 人数に合わせて分量を増減する（"1/2" "2" などの数値だけ。「適量」などはそのまま）
+function scaleQuantity(quantity: string | null, factor: number): string | null {
+  if (quantity == null || factor === 1) return quantity
+  const n = parseQty(quantity)
+  if (n == null) return quantity
+  const v = n * factor
+  const rounded = v >= 100 ? Math.round(v) : v >= 10 ? Math.round(v * 10) / 10 : Math.round(v * 100) / 100
+  return String(rounded)
+}
+
+function roundSmart(value: number): number {
+  const abs = Math.abs(value)
+  if (abs === 0) return 0
+  if (abs >= 10) return Math.round(value)
+  if (abs >= 1) return Math.round(value * 10) / 10
+  return Math.round(value * 100) / 100
+}
+
+function fmtVal(value: number | null, unit: string): string {
+  if (value == null) return '―'
+  return `${roundSmart(value)}${unit}`
+}
+
+// ビューの値を number で取り出す
+function nv(row: NutritionRow | null, col: string): number | null {
+  const v = row?.[col]
+  return typeof v === 'number' ? v : null
+}
+
+// 栄養素（1人前あたり）を、選んだ人数ぶんにして取り出す
+function nvPer(row: NutritionRow | null, col: string, servings: number): number | null {
+  const v = nv(row, col)
+  return v == null ? null : v * servings
+}
+
+// 材料マスタの列名 → ビューの列名（xxx_per_100g → xxx_per_serving）
+function servingCol(key: string): string {
+  return key.replace('_per_100g', '_per_serving')
+}
+
+// 栄養素の表示グループ（カロリーは上のカードに出すので除外）
+const MAIN_KEYS = [
+  'protein_g_per_100g',
+  'fat_g_per_100g',
+  'carbohydrate_g_per_100g',
+  'sugar_g_per_100g',
+  'dietary_fiber_g_per_100g',
+  'salt_g_per_100g',
+]
+const INDENT_KEYS = ['sugar_g_per_100g', 'dietary_fiber_g_per_100g'] // 炭水化物の内訳は字下げ
 
 export default function RecipeDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -1477,11 +3311,18 @@ export default function RecipeDetailPage() {
   const { session } = useOutletContext<{ session: Session }>()
 
   const [recipe, setRecipe] = useState<Recipe | null>(null)
-  const [ingredients, setIngredients] = useState<Ingredient[]>([])
+  const [ingredients, setIngredients] = useState<IngredientRow[]>([])
   const [steps, setSteps] = useState<Step[]>([])
+  const [nutrition, setNutrition] = useState<NutritionRow | null>(null)
+  const [nutritionFailed, setNutritionFailed] = useState(false)
+  const [cookLogs, setCookLogs] = useState<CookLog[]>([])
+  const [cookLogsFailed, setCookLogsFailed] = useState(false)
+  const [showAllLogs, setShowAllLogs] = useState(false)
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [togglingPlanned, setTogglingPlanned] = useState(false)
+  const [showNutrients, setShowNutrients] = useState(false)
+  const [servings, setServings] = useServings() // 何人前で表示するか（共通設定）
 
   const imageUrl = useRecipeImage(recipe?.image_path ?? null)
 
@@ -1493,10 +3334,21 @@ export default function RecipeDetailPage() {
       setLoading(true)
       setErrorMessage(null)
 
-      const [recipeResult, ingredientsResult, stepsResult] = await Promise.all([
+      const [recipeResult, ingredientsResult, stepsResult, nutritionResult, logsResult] = await Promise.all([
         supabase.from('recipes').select('*').eq('id', id).single(),
-        supabase.from('ingredients').select('*').eq('recipe_id', id).order('sort_order'),
+        supabase
+          .from('ingredients')
+          .select('*, ingredient_master(default_unit, unit_weight_g)')
+          .eq('recipe_id', id)
+          .order('sort_order'),
         supabase.from('steps').select('*').eq('recipe_id', id).order('step_number'),
+        supabase.from('recipe_nutrition').select('*').eq('recipe_id', id).maybeSingle(),
+        supabase
+          .from('cook_logs')
+          .select('id, household_id, recipe_id, cooked_on, cooked_by, created_at')
+          .eq('recipe_id', id)
+          .order('cooked_on', { ascending: false })
+          .order('created_at', { ascending: false }),
       ])
 
       if (isCancelled) return
@@ -1508,41 +3360,90 @@ export default function RecipeDetailPage() {
       }
 
       setRecipe(recipeResult.data as Recipe)
-      setIngredients((ingredientsResult.data as Ingredient[]) ?? [])
+
+      // 材料：マスタ結合つきの取得に失敗したときは、結合なしで取り直す（表示は止めない）
+      if (ingredientsResult.error) {
+        console.error(ingredientsResult.error)
+        const fallback = await supabase
+          .from('ingredients')
+          .select('*')
+          .eq('recipe_id', id)
+          .order('sort_order')
+        if (isCancelled) return
+        setIngredients(
+          ((fallback.data ?? []) as Ingredient[]).map((i) => ({ ...i, ingredient_master: null })),
+        )
+      } else {
+        setIngredients((ingredientsResult.data ?? []) as IngredientRow[])
+      }
+
       setSteps((stepsResult.data as Step[]) ?? [])
+
+      if (nutritionResult.error) {
+        console.error(nutritionResult.error)
+        setNutritionFailed(true)
+      } else {
+        setNutrition((nutritionResult.data as NutritionRow | null) ?? null)
+      }
+
+      // 作った履歴：読めなくても（11のSQL未実行など）、ほかの表示は止めない
+      if (logsResult.error) {
+        console.error(logsResult.error)
+        setCookLogsFailed(true)
+      } else {
+        setCookLogs((logsResult.data ?? []) as CookLog[])
+      }
       setLoading(false)
     }
 
     fetchDetail()
-
     return () => {
       isCancelled = true
     }
   }, [id])
 
+  // 献立候補の追加／外す。追加は「候補」から。外すときは確定も解除する
   const handleTogglePlanned = async () => {
     if (!recipe) return
     setTogglingPlanned(true)
-
-    const nextIsPlanned = !recipe.is_planned
-    const { error } = await supabase
+    const adding = !recipe.is_planned
+    const { data, error } = await supabase
       .from('recipes')
       .update({
-        is_planned: nextIsPlanned,
-        planned_by: nextIsPlanned ? session.user.id : null,
-        planned_at: nextIsPlanned ? new Date().toISOString() : null,
+        is_planned: adding,
+        plan_confirmed: false,
+        planned_by: adding ? session.user.id : null,
+        planned_at: adding ? new Date().toISOString() : null,
       })
       .eq('id', recipe.id)
-
+      .select('id')
     setTogglingPlanned(false)
 
-    if (error) {
-      alert('更新に失敗しました: ' + error.message)
+    if (error || !data || data.length === 0) {
+      alert('更新に失敗しました: ' + (error?.message ?? '権限を確認してください'))
       return
     }
-
-    setRecipe({ ...recipe, is_planned: nextIsPlanned })
+    setRecipe({ ...recipe, is_planned: adding, plan_confirmed: false })
   }
+
+  // 未計算の材料（分量が「適量」などのものは数えない）
+  const unresolvedSet = useMemo(() => {
+    const s = new Set<string>()
+    ingredients.forEach((ing) => {
+      if (!isNegligible(ing.quantity) && !isResolved(ing)) s.add(ing.id)
+    })
+    return s
+  }, [ingredients])
+
+  // 栄養素の表示行（マスタ側の定義を流用）
+  const nutrientRows = useMemo(() => {
+    const byKey = new Map(NUTRIENT_INFO_LIST.map((n) => [String(n.key), n]))
+    const main = MAIN_KEYS.map((k) => byKey.get(k)).filter((n): n is NutrientInfo => n !== undefined)
+    const micro = NUTRIENT_INFO_LIST.filter(
+      (n) => String(n.key) !== 'calorie_per_100g' && !MAIN_KEYS.includes(String(n.key)),
+    )
+    return { main, micro }
+  }, [])
 
   if (loading) {
     return (
@@ -1558,20 +3459,30 @@ export default function RecipeDetailPage() {
     return (
       <div className="max-w-md mx-auto p-4 text-center">
         <p className="text-sm text-red-600 mb-4">{errorMessage}</p>
-        <button
-          onClick={() => navigate('/recipes')}
-          className="text-amber-600 underline text-sm"
-        >
+        <button onClick={() => navigate('/recipes')} className="text-amber-600 underline text-sm">
           一覧に戻る
         </button>
       </div>
     )
   }
 
-  const totalCalories =
-    recipe.calories_per_serving != null ? recipe.calories_per_serving * recipe.servings : null
-  const totalCost =
-    recipe.cost_per_serving != null ? recipe.cost_per_serving * recipe.servings : null
+  // ビューの値は「1人前あたり」。選んだ人数ぶんに掛けて表示する
+  const kcalPer = nv(nutrition, 'calorie_per_serving')
+  const costPer = nv(nutrition, 'price_per_serving')
+  const kcalN = kcalPer != null ? kcalPer * servings : null
+  const costN = costPer != null ? costPer * servings : null
+  const factor = servings / recipe.servings // 材料の分量を増減する倍率
+  const unresolvedCount = unresolvedSet.size
+
+  // 献立の状態：未追加／候補／確定
+  const planState: 'none' | 'candidate' | 'confirmed' = !recipe.is_planned
+    ? 'none'
+    : recipe.plan_confirmed
+      ? 'confirmed'
+      : 'candidate'
+
+  // 作った履歴（新しい順に10件。「すべて表示」で全件）
+  const shownLogs = showAllLogs ? cookLogs : cookLogs.slice(0, LOG_PREVIEW)
 
   return (
     <div className="max-w-md mx-auto pb-6">
@@ -1586,59 +3497,136 @@ export default function RecipeDetailPage() {
 
       <div className="p-4">
         {/* 戻るボタン */}
-        <button
-          onClick={() => navigate('/recipes')}
-          className="text-sm text-gray-500 mb-3"
-        >
+        <button onClick={() => navigate('/recipes')} className="text-sm text-gray-500 mb-3">
           ← 一覧に戻る
         </button>
 
         <h1 className="text-xl font-bold text-gray-900">{recipe.dish_name}</h1>
         {(recipe.genre || recipe.category) && (
           <p className="text-sm text-gray-400 mt-0.5">
-            {recipe.genre}{recipe.genre && recipe.category ? ' ・ ' : ''}{recipe.category}
+            {recipe.genre}
+            {recipe.genre && recipe.category ? ' ・ ' : ''}
+            {recipe.category}
           </p>
         )}
+        <p className="text-xs text-gray-400 mt-1">
+          ⏱ {recipe.cooking_time_minutes != null ? `${recipe.cooking_time_minutes}分` : '―'}
+          {' ・ '}
+          {recipe.cook_count}回作った
+        </p>
 
-        {/* 作る予定トグル */}
+        {/* 献立候補トグル（確定・作ったは献立画面で行う） */}
         <button
           onClick={handleTogglePlanned}
           disabled={togglingPlanned}
           className={`mt-4 w-full rounded-lg py-2.5 font-semibold transition disabled:opacity-50 ${
-            recipe.is_planned
-              ? 'bg-amber-100 text-amber-700 border border-amber-400'
-              : 'bg-amber-500 text-white'
+            planState === 'none'
+              ? 'bg-amber-500 text-white'
+              : planState === 'candidate'
+                ? 'bg-amber-100 text-amber-700 border border-amber-400'
+                : 'bg-green-100 text-green-700 border border-green-400'
           }`}
         >
-          {recipe.is_planned ? '✓ 作る予定に入っています(タップで解除)' : '作る予定に追加する'}
+          {planState === 'none' && '献立候補に追加する'}
+          {planState === 'candidate' && '✓ 献立候補に入っています(タップで外す)'}
+          {planState === 'confirmed' && '✓ 献立に確定済みです(タップで外す)'}
         </button>
+        {planState !== 'none' && (
+          <p className="mt-1 text-center text-[11px] text-gray-400">
+            確定・作ったの操作は、下の「献立」タブで行えます
+          </p>
+        )}
 
-        {/* カロリー・費用 */}
-        <div className="grid grid-cols-2 gap-3 mt-4">
+        {/* 人数の切替（カロリー・費用・栄養素・材料の分量に反映） */}
+        <div className="mt-4 flex items-center justify-between">
+          <span className="text-sm font-semibold text-gray-800">何人前で見る？</span>
+          <ServingsStepper value={servings} onChange={setServings} />
+        </div>
+
+        {/* カロリー・費用（材料マスタから計算。選んだ人数ぶん） */}
+        <div className="grid grid-cols-2 gap-3 mt-3">
           <div className="bg-white rounded-xl shadow-sm p-3 text-center">
-            <p className="text-xs text-gray-400">カロリー(目安)</p>
-            <p className="text-lg font-semibold text-gray-800">
-              {recipe.calories_per_serving ?? '—'} kcal/人前
-            </p>
-            {totalCalories != null && (
-              <p className="text-xs text-gray-400">合計 約{totalCalories}kcal({recipe.servings}人前)</p>
+            <p className="text-xs text-gray-400">カロリー({servings}人前)</p>
+            <p className="text-lg font-semibold text-gray-800">{fmtVal(kcalN, 'kcal')}</p>
+            {servings !== 1 && kcalPer != null && (
+              <p className="text-xs text-gray-400">1人前 {fmtVal(kcalPer, 'kcal')}</p>
             )}
           </div>
           <div className="bg-white rounded-xl shadow-sm p-3 text-center">
-            <p className="text-xs text-gray-400">費用(目安)</p>
-            <p className="text-lg font-semibold text-gray-800">
-              {recipe.cost_per_serving ?? '—'} 円/人前
-            </p>
-            {totalCost != null && (
-              <p className="text-xs text-gray-400">合計 約{totalCost}円({recipe.servings}人前)</p>
+            <p className="text-xs text-gray-400">費用({servings}人前)</p>
+            <p className="text-lg font-semibold text-gray-800">{fmtVal(costN, '円')}</p>
+            {servings !== 1 && costPer != null && (
+              <p className="text-xs text-gray-400">1人前 {fmtVal(costPer, '円')}</p>
             )}
           </div>
         </div>
 
+        {/* 計算できなかったときの注意 */}
+        {nutritionFailed && (
+          <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            栄養・費用の計算ビュー（recipe_nutrition）を読み込めませんでした。
+          </p>
+        )}
+        {unresolvedCount > 0 && (
+          <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            ※ 計算できていない材料が{unresolvedCount}件あります（下の材料に「未計算」と表示）。その分は金額・栄養に含まれていません。
+          </p>
+        )}
+        <p className="mt-2 text-[11px] text-gray-400">
+          ※ 材料マスタの単価・栄養価から計算した目安です。
+        </p>
+
+        {/* 栄養素（タップで開閉） */}
+        <section className="mt-4">
+          <button
+            onClick={() => setShowNutrients((v) => !v)}
+            className="flex w-full items-center justify-between rounded-xl bg-white px-4 py-3 shadow-sm"
+          >
+            <span className="font-semibold text-gray-800">栄養素（{servings}人前）</span>
+            <span className="text-sm text-gray-400">{showNutrients ? '閉じる ▲' : '開く ▼'}</span>
+          </button>
+
+          {showNutrients && (
+            <div className="mt-2 rounded-xl bg-white px-4 py-3 text-sm shadow-sm">
+              {nutrition == null ? (
+                <p className="text-gray-400">栄養データがありません。</p>
+              ) : (
+                <>
+                  <div className="mb-1 text-xs font-semibold text-gray-500">栄養価</div>
+                  {nutrientRows.main.map((n) => (
+                    <NutrientLine
+                      key={String(n.key)}
+                      label={n.label}
+                      indent={INDENT_KEYS.includes(String(n.key))}
+                      value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
+                    />
+                  ))}
+                  <div className="mb-1 mt-3 border-t border-gray-100 pt-2 text-xs font-semibold text-gray-500">
+                    ビタミン・ミネラル
+                  </div>
+                  {nutrientRows.micro.map((n) => (
+                    <NutrientLine
+                      key={String(n.key)}
+                      label={n.label}
+                      value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
+                    />
+                  ))}
+                  <p className="mt-3 text-[11px] text-gray-400">
+                    ※ マスタに値が入っていない材料は、その栄養素の合計に含まれません。
+                  </p>
+                </>
+              )}
+            </div>
+          )}
+        </section>
+
         {/* 材料 */}
         <section className="mt-6">
           <h2 className="font-semibold text-gray-800 mb-2">
-            材料({recipe.servings}人前)
+            材料({servings}人前)
+            {servings !== recipe.servings && (
+              <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
+            )}
           </h2>
           {ingredients.length === 0 ? (
             <p className="text-sm text-gray-400">材料情報はありません。</p>
@@ -1648,13 +3636,14 @@ export default function RecipeDetailPage() {
                 <li key={ing.id} className="flex justify-between px-4 py-2 text-sm">
                   <span className="text-gray-700">
                     {ing.ingredient_name}
-                    {ing.preparation && (
-                      <span className="text-gray-400">({ing.preparation})</span>
+                    {ing.preparation && <span className="text-gray-400">({ing.preparation})</span>}
+                    {unresolvedSet.has(ing.id) && (
+                      <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                        未計算
+                      </span>
                     )}
                   </span>
-                  <span className="text-gray-500">
-                    {ing.quantity ?? ''}{ing.unit ?? ''}
-                  </span>
+                  <span className="text-gray-500">{formatAmount(scaleQuantity(ing.quantity, factor), ing.unit)}</span>
                 </li>
               ))}
             </ul>
@@ -1678,12 +3667,50 @@ export default function RecipeDetailPage() {
                       <span className="font-medium text-gray-800 text-sm">{step.step_name}</span>
                     )}
                   </div>
-                  {step.description && (
-                    <p className="text-sm text-gray-600 pl-8">{step.description}</p>
-                  )}
+                  {step.description && <p className="text-sm text-gray-600 pl-8">{step.description}</p>}
                 </li>
               ))}
             </ol>
+          )}
+        </section>
+
+        {/* 作った履歴（献立で「作った」にした日付） */}
+        <section className="mt-6">
+          <h2 className="font-semibold text-gray-800 mb-2">
+            🍳 作った履歴
+            <span className="ml-2 text-xs font-normal text-gray-400">{recipe.cook_count}回</span>
+          </h2>
+          {cookLogsFailed ? (
+            <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              作った履歴を読み込めませんでした（11_cook_logs_migration.sql を実行済みか確認してください）。
+            </p>
+          ) : cookLogs.length === 0 ? (
+            <p className="text-sm text-gray-400">
+              日付の記録はまだありません。献立で「作った」にすると、ここに残ります。
+            </p>
+          ) : (
+            <>
+              <ul className="bg-white rounded-xl shadow-sm divide-y divide-gray-100">
+                {shownLogs.map((log) => (
+                  <li key={log.id} className="px-4 py-2 text-sm text-gray-700">
+                    {formatCookedDate(log.cooked_on)}
+                  </li>
+                ))}
+              </ul>
+              {cookLogs.length > LOG_PREVIEW && (
+                <button
+                  onClick={() => setShowAllLogs((v) => !v)}
+                  className="mt-2 w-full rounded-lg border border-gray-300 bg-white py-2 text-xs font-semibold text-gray-600"
+                >
+                  {showAllLogs ? '閉じる ▲' : `すべて表示（${cookLogs.length}件） ▼`}
+                </button>
+              )}
+              {recipe.cook_count > cookLogs.length && (
+                <p className="mt-2 text-[11px] text-gray-400">
+                  ※ 日付が残るのは、履歴機能を入れたあとに「作った」にした分だけです（それ以前の分は回数のみ）。
+                </p>
+              )}
+            </>
           )}
         </section>
 
@@ -1702,23 +3729,41 @@ export default function RecipeDetailPage() {
     </div>
   )
 }
-echo ..
+
+// 栄養素の1行表示（ラベル ＋ 値）
+function NutrientLine({ label, value, indent }: { label: string; value: string; indent?: boolean }) {
+  return (
+    <div className="flex items-center justify-between py-0.5 text-gray-700">
+      <span className={indent ? 'pl-4 text-gray-500' : ''}>{label}</span>
+      <span>{value}</span>
+    </div>
+  )
+}
+..
+
 ===== src\pages\RecipeListPage.tsx =====
 ..
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 前提：Supabaseに recipe_nutrition ビューを作成済みであること（01_recipe_nutrition_view.sql）
+// 前提：recipe_nutrition ビュー（01）と、recipes.plan_confirmed 列（09）を作成済みであること
 // 機能：
-//  ・表示切替：「写真」（YouTube風2列）／「リスト」（材料画面と同じUI）
-//  ・絞り込み：すべて／作る予定（1行目）、ジャンル 和食・洋食・中華・その他（2行目）
-//  ・並び替え：作った回数が多い順（既定）／値段が安い順／カロリーが低い順／調理時間が短い順
-//             ／栄養素が多い順／食塩・脂質・糖質が少ない順
-//  ・値は「1人前あたり」。材料マスタから計算（未計算の材料があれば※表示、並び替えでは後ろへ）
+//  ・検索ボックスの右横に、写真／リスト切替
+//  ・ジャンル（すべて・和食・洋食・中華・エスニック・その他）を1行、サブカテゴリ（6分類）を1行
+//  ・リスト表示：カードを左へスワイプ →「献立候補」に追加／献立から外す（離すと確定）
+//  ・値は、右上の人数（共通設定）あたりで表示。「－ 2人前 ＋」で変更（詳細・献立画面と共通）
+//  ・写真表示：サムネ右上の＋ボタンで 候補に追加／外す
+//  ・追加／解除のあとに「元に戻す」付きのメッセージを数秒表示
+//  ・カードのバッジ：「候補」「確定」で献立の状態を表示（確定・作ったは献立画面で行う）
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useOutletContext } from 'react-router-dom'
+import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../supabaseClient'
 import type { Recipe as RecipeBase } from '../types/recipe'
 import type { IngredientMaster } from '../types/ingredient'
 import { NUTRIENT_INFO_LIST, getNutrientInfo } from '../data/nutrientInfo'
+import SwipeRow from '../components/SwipeRow'
+import type { SwipeAction } from '../components/SwipeRow'
+import ServingsStepper from '../components/ServingsStepper'
+import { useServings } from '../lib/useServings'
 
 // 一覧で使う項目だけ抜き出す
 type Recipe = Pick<
@@ -1732,6 +3777,7 @@ type Recipe = Pick<
   | 'cook_count'
   | 'image_path'
   | 'is_planned'
+  | 'plan_confirmed'
   | 'updated_at'
 >
 
@@ -1743,20 +3789,34 @@ type RecipeRow = Recipe & { nutrition: NutritionRow | null }
 const BUCKET = 'recipe-images'
 
 // ---------- ジャンル ----------
-const GENRES = ['和食', '洋食', '中華'] as const
+const GENRES = ['和食', '洋食', '中華', 'エスニック'] as const
 type GenreFilter = 'すべて' | (typeof GENRES)[number] | 'その他'
-const GENRE_CHIPS: GenreFilter[] = [...GENRES, 'その他']
+// 1行に並べるチップ（先頭の「すべて」はジャンル絞り込みの解除）
+const GENRE_CHIPS: GenreFilter[] = ['すべて', ...GENRES, 'その他']
 
 const GENRE_COLOR: Record<string, string> = {
   和食: 'bg-red-100 text-red-700',
   洋食: 'bg-blue-100 text-blue-700',
   中華: 'bg-orange-100 text-orange-700',
+  エスニック: 'bg-green-100 text-green-700',
   その他: 'bg-gray-100 text-gray-700',
 }
 
 function genreOf(r: { genre: string | null }): string {
   return r.genre && (GENRES as readonly string[]).includes(r.genre) ? r.genre : 'その他'
 }
+
+// ---------- サブカテゴリ ----------
+// value＝DB(recipes.category)に保存されている値 / label＝チップに出す短い表記
+const CATEGORIES = [
+  { value: '主菜', label: '主菜' },
+  { value: '副菜・つまみ', label: '副菜' },
+  { value: '汁物・スープ', label: '汁物' },
+  { value: '麺・丼・ワンプレート', label: '麺・丼' },
+  { value: 'デザート', label: 'デザート' },
+  { value: 'ソース・調味料', label: 'ソース' },
+] as const
+type CategoryFilter = 'すべて' | (typeof CATEGORIES)[number]['value']
 
 // ---------- 並び替えの定義 ----------
 // 栄養素の「多い順」「少ない順」。キーは材料マスタ側の列名（nutrientInfo.ts と共通）
@@ -1848,16 +3908,34 @@ function fmtVal(value: number | null, unit: string): string {
   return `${roundSmart(value)}${unit}`
 }
 
+// ビューの値は「1人前あたり」。表示する人数ぶんに掛ける
+function nvN(r: RecipeRow, col: string, servings: number): number | null {
+  const v = nv(r, col)
+  return v == null ? null : v * servings
+}
+
+// 献立の状態：候補／確定／なし
+function planLabel(r: Pick<Recipe, 'is_planned' | 'plan_confirmed'>): '確定' | '候補' | null {
+  if (!r.is_planned) return null
+  return r.plan_confirmed ? '確定' : '候補'
+}
+
+type Toast = { message: string; undo: () => void }
+
 export default function RecipeListPage() {
+  const { session } = useOutletContext<{ session: Session }>()
+
   const [recipes, setRecipes] = useState<RecipeRow[]>([])
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [nutritionNotice, setNutritionNotice] = useState<string | null>(null)
+  const [toast, setToast] = useState<Toast | null>(null)
+  const [servings, setServings] = useServings() // 何人前で表示するか（共通設定）
 
   const [keyword, setKeyword] = useState('')
-  const [plannedOnly, setPlannedOnly] = useState(false)
   const [genreFilter, setGenreFilter] = useState<GenreFilter>('すべて')
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('すべて')
   const [sortKey, setSortKey] = useState<string>('cook_count')
   const [viewMode, setViewMode] = useState<ViewMode>(() =>
     localStorage.getItem(VIEW_MODE_KEY) === 'list' ? 'list' : 'photo',
@@ -1874,7 +3952,7 @@ export default function RecipeListPage() {
         supabase
           .from('recipes')
           .select(
-            'id, dish_name, genre, category, source_name, cooking_time_minutes, cook_count, image_path, is_planned, updated_at',
+            'id, dish_name, genre, category, source_name, cooking_time_minutes, cook_count, image_path, is_planned, plan_confirmed, updated_at',
           )
           .order('updated_at', { ascending: false }),
         supabase.from('recipe_nutrition').select('*'),
@@ -1917,20 +3995,81 @@ export default function RecipeListPage() {
     })()
   }, [])
 
+  // 「元に戻す」メッセージは4秒で自動的に消す
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 4000)
+    return () => clearTimeout(t)
+  }, [toast])
+
+  // ---------- 献立候補の追加／献立から外す ----------
+  // 追加は「候補」から始める（確定は献立画面）。外すときは確定も解除する
+  // 画面に先に反映 → DBを更新 → 失敗したら元に戻す
+  const setMenuState = async (
+    id: string,
+    state: { is_planned: boolean; plan_confirmed: boolean },
+  ): Promise<boolean> => {
+    const prev = recipes.find((r) => r.id === id)
+    setRecipes((list) => list.map((r) => (r.id === id ? { ...r, ...state } : r)))
+    const { data, error: updError } = await supabase
+      .from('recipes')
+      .update({
+        is_planned: state.is_planned,
+        plan_confirmed: state.plan_confirmed,
+        planned_by: state.is_planned ? session.user.id : null,
+        planned_at: state.is_planned ? new Date().toISOString() : null,
+      })
+      .eq('id', id)
+      .select('id')
+
+    if (updError || !data || data.length === 0) {
+      if (prev) {
+        setRecipes((list) =>
+          list.map((r) =>
+            r.id === id ? { ...r, is_planned: prev.is_planned, plan_confirmed: prev.plan_confirmed } : r,
+          ),
+        )
+      }
+      alert('更新に失敗しました: ' + (updError?.message ?? '権限を確認してください'))
+      return false
+    }
+    return true
+  }
+
+  const togglePlanned = async (r: RecipeRow) => {
+    const before = { is_planned: r.is_planned, plan_confirmed: r.plan_confirmed }
+    const adding = !r.is_planned
+    const ok = await setMenuState(
+      r.id,
+      adding ? { is_planned: true, plan_confirmed: false } : { is_planned: false, plan_confirmed: false },
+    )
+    if (!ok) return
+    setToast({
+      message: adding
+        ? `「${r.dish_name}」を献立候補に追加しました`
+        : `「${r.dish_name}」を献立から外しました`,
+      undo: () => {
+        void setMenuState(r.id, before)
+        setToast(null)
+      },
+    })
+  }
+
   // 絞り込み
   const filtered = useMemo(() => {
     const k = keyword.trim().toLowerCase()
     return recipes.filter((r) => {
-      if (plannedOnly && !r.is_planned) return false
       if (genreFilter !== 'すべて' && genreOf(r) !== genreFilter) return false
+      if (categoryFilter !== 'すべて' && r.category !== categoryFilter) return false
       if (!k) return true
       return (
         r.dish_name.toLowerCase().includes(k) ||
         (r.source_name ?? '').toLowerCase().includes(k) ||
-        (r.genre ?? '').toLowerCase().includes(k)
+        (r.genre ?? '').toLowerCase().includes(k) ||
+        (r.category ?? '').toLowerCase().includes(k)
       )
     })
-  }, [recipes, keyword, plannedOnly, genreFilter])
+  }, [recipes, keyword, genreFilter, categoryFilter])
 
   // 並び替え
   const sorted = useMemo(() => {
@@ -1978,53 +4117,62 @@ export default function RecipeListPage() {
     return null
   }, [sortKey])
   const sortNutrientCol = sortNutrient ? servingCol(String(sortNutrient.key)) : null
-
-  const handleSelectAll = () => {
-    setPlannedOnly(false)
-    setGenreFilter('すべて')
-  }
+  const sortNutrientInfo: SortNutrientInfo = sortNutrient
+    ? { label: sortNutrient.label, unit: sortNutrient.unit, col: sortNutrientCol as string }
+    : null
 
   return (
     <div className="min-h-screen bg-gray-50">
       {/* 上部固定エリア */}
       <header className="sticky top-0 z-40 bg-white px-3 pt-3 pb-2 shadow-sm">
-        <input
-          type="search"
-          value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
-          placeholder="🔍 料理名・引用元で検索"
-          className="w-full rounded-full bg-gray-100 px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-300"
-        />
-
-        {/* 1段目：すべて・作る予定　／　右端：表示切替 */}
-        <div className="mt-2 flex items-center gap-2">
-          <Chip active={!plannedOnly && genreFilter === 'すべて'} onClick={handleSelectAll}>
-            すべて
-          </Chip>
-          <Chip active={plannedOnly} onClick={() => setPlannedOnly((p) => !p)}>
-            作る予定
-          </Chip>
-          <div className="ml-auto flex overflow-hidden rounded-lg border border-gray-200 text-xs font-bold">
+        {/* 検索ボックス ＋ 右横に 写真／リスト切替 */}
+        <div className="flex items-center gap-2">
+          <input
+            type="search"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            placeholder="🔍 料理名・引用元で検索"
+            className="min-w-0 flex-1 rounded-full bg-gray-100 px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-300"
+          />
+          <div className="flex shrink-0 overflow-hidden rounded-lg border border-gray-200 text-base">
             <button
               onClick={() => changeViewMode('photo')}
-              className={`px-2.5 py-1 ${viewMode === 'photo' ? 'bg-gray-900 text-white' : 'bg-white text-gray-600'}`}
+              aria-label="写真表示"
+              title="写真表示"
+              className={`px-2.5 py-1.5 ${viewMode === 'photo' ? 'bg-gray-900' : 'bg-white opacity-60'}`}
             >
-              🖼️ 写真
+              🖼️
             </button>
             <button
               onClick={() => changeViewMode('list')}
-              className={`px-2.5 py-1 ${viewMode === 'list' ? 'bg-gray-900 text-white' : 'bg-white text-gray-600'}`}
+              aria-label="リスト表示"
+              title="リスト表示"
+              className={`px-2.5 py-1.5 ${viewMode === 'list' ? 'bg-gray-900' : 'bg-white opacity-60'}`}
             >
-              📋 リスト
+              📋
             </button>
           </div>
         </div>
 
-        {/* 2段目：ジャンル */}
-        <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+        {/* 1行目：ジャンル（すべて・和食・洋食・中華・エスニック・その他） */}
+        <div className="mt-2 flex gap-1.5">
           {GENRE_CHIPS.map((g) => (
-            <Chip key={g} active={genreFilter === g} onClick={() => setGenreFilter((prev) => (prev === g ? 'すべて' : g))}>
+            <Chip key={g} fill active={genreFilter === g} onClick={() => setGenreFilter(g)}>
               {g}
+            </Chip>
+          ))}
+        </div>
+
+        {/* 2行目：サブカテゴリ（短い表記。もう一度押すと解除） */}
+        <div className="mt-1.5 flex gap-1.5">
+          {CATEGORIES.map((c) => (
+            <Chip
+              key={c.value}
+              fill
+              active={categoryFilter === c.value}
+              onClick={() => setCategoryFilter((prev) => (prev === c.value ? 'すべて' : c.value))}
+            >
+              {c.label}
             </Chip>
           ))}
         </div>
@@ -2076,10 +4224,13 @@ export default function RecipeListPage() {
           </select>
         </div>
 
-        {/* 件数（左）＋「1人前あたり」の固定表示（右） */}
-        <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-          <span>{loading ? '読み込み中…' : `${sorted.length}件`}</span>
-          <span className="rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-600">1人前あたり</span>
+        {/* 件数（左）＋ 操作のヒント ＋ 人数切替（右） */}
+        <div className="mt-2 flex items-center justify-between gap-2 text-xs text-gray-500">
+          <span className="shrink-0">{loading ? '読み込み中…' : `${sorted.length}件`}</span>
+          <span className="min-w-0 truncate text-[10px] text-gray-400">
+            {viewMode === 'list' ? '← 左スワイプで献立候補に追加' : '右上の＋で献立候補に追加'}
+          </span>
+          <ServingsStepper value={servings} onChange={setServings} />
         </div>
       </header>
 
@@ -2098,7 +4249,9 @@ export default function RecipeListPage() {
                   key={r.id}
                   recipe={r}
                   imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
-                  sortNutrient={sortNutrient ? { label: sortNutrient.label, unit: sortNutrient.unit, col: sortNutrientCol as string } : null}
+                  sortNutrient={sortNutrientInfo}
+                  servings={servings}
+                  onTogglePlanned={() => togglePlanned(r)}
                 />
               ))}
         </div>
@@ -2109,12 +4262,18 @@ export default function RecipeListPage() {
                 <div key={i} className="h-16 animate-pulse rounded-xl bg-gray-200" />
               ))
             : sorted.map((r) => (
-                <ListCard
+                <SwipeRow
                   key={r.id}
-                  recipe={r}
-                  imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
-                  sortNutrient={sortNutrient ? { label: sortNutrient.label, unit: sortNutrient.unit, col: sortNutrientCol as string } : null}
-                />
+                  left={r.is_planned ? SWIPE_REMOVE : SWIPE_ADD}
+                  onSwipeLeft={() => togglePlanned(r)}
+                >
+                  <ListCard
+                    recipe={r}
+                    imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
+                    sortNutrient={sortNutrientInfo}
+                    servings={servings}
+                  />
+                </SwipeRow>
               ))}
         </div>
       )}
@@ -2122,58 +4281,114 @@ export default function RecipeListPage() {
       {!loading && sorted.length === 0 && (
         <p className="p-8 text-center text-sm text-gray-400">レシピが見つかりません</p>
       )}
+
+      {/* 追加／解除のあとに出る「元に戻す」メッセージ */}
+      {toast && (
+        <div
+          className="pointer-events-none fixed inset-x-0 z-50 flex justify-center px-3"
+          style={{ bottom: 'calc(4.5rem + env(safe-area-inset-bottom))' }}
+        >
+          <div className="pointer-events-auto flex max-w-md items-center gap-3 rounded-xl bg-gray-900 px-4 py-2.5 text-sm text-white shadow-lg">
+            <span className="min-w-0 flex-1 truncate">{toast.message}</span>
+            <button onClick={toast.undo} className="shrink-0 font-bold text-amber-300">
+              元に戻す
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 type SortNutrientInfo = { label: string; unit: string; col: string } | null
 
+// 献立の状態バッジ（候補＝オレンジの薄色／確定＝緑）
+function PlanBadge({ recipe }: { recipe: Pick<Recipe, 'is_planned' | 'plan_confirmed'> }) {
+  const label = planLabel(recipe)
+  if (!label) return null
+  return (
+    <span
+      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${
+        label === '確定' ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-600'
+      }`}
+    >
+      {label}
+    </span>
+  )
+}
+
+// ---------- スワイプ時の表示（左スワイプ：献立候補に追加／献立から外す） ----------
+const SWIPE_ADD: SwipeAction = { label: '＋ 献立候補', readyLabel: '離して追加', className: 'bg-orange-500' }
+const SWIPE_REMOVE: SwipeAction = { label: '献立から外す', readyLabel: '離して外す', className: 'bg-gray-500' }
+
 // ---------- 写真表示（YouTube風2列） ----------
 function PhotoCard({
   recipe: r,
   imageUrl,
   sortNutrient,
+  servings,
+  onTogglePlanned,
 }: {
   recipe: RecipeRow
   imageUrl?: string
   sortNutrient: SortNutrientInfo
+  servings: number
+  onTogglePlanned: () => void
 }) {
   const title = r.source_name ? `${r.dish_name} / ${r.source_name}` : r.dish_name
-  const kcal = nv(r, 'calorie_per_serving')
-  const price = nv(r, 'price_per_serving')
+  const kcal = nvN(r, 'calorie_per_serving', servings)
+  const price = nvN(r, 'price_per_serving', servings)
   const unresolved = unresolvedCount(r)
+  const label = planLabel(r)
 
   return (
-    <Link to={`/recipes/${r.id}`} className="block active:opacity-70">
-      <div className="relative aspect-video overflow-hidden rounded-xl bg-gray-200">
-        {imageUrl ? (
-          <img src={imageUrl} alt={r.dish_name} loading="lazy" className="h-full w-full object-cover" />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-3xl">🍽️</div>
-        )}
-        {r.is_planned && (
-          <span className="absolute left-1 top-1 rounded bg-orange-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
-            作る予定
-          </span>
-        )}
-        {r.cooking_time_minutes != null && (
-          <span className="absolute bottom-1 right-1 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-bold text-white">
-            ⏱ {r.cooking_time_minutes}分
-          </span>
-        )}
-      </div>
-      <p className="mt-1.5 line-clamp-2 text-[13px] font-bold leading-snug text-gray-900">{title}</p>
-      <p className="mt-0.5 text-[11px] text-gray-500">
-        {sortNutrient
-          ? `${sortNutrient.label} ${fmtVal(nv(r, sortNutrient.col), sortNutrient.unit)}`
-          : fmtVal(kcal, 'kcal')}
-        {' ・ '}
-        {fmtVal(price, '円')}
-        {' ・ '}
-        {r.cook_count}回
-        {unresolved > 0 && <span className="ml-1 text-amber-600">※未計算あり</span>}
-      </p>
-    </Link>
+    <div className="relative">
+      <Link to={`/recipes/${r.id}`} className="block active:opacity-70">
+        <div className="relative aspect-video overflow-hidden rounded-xl bg-gray-200">
+          {imageUrl ? (
+            <img src={imageUrl} alt={r.dish_name} loading="lazy" className="h-full w-full object-cover" />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center text-3xl">🍽️</div>
+          )}
+          {label && (
+            <span
+              className={`absolute left-1 top-1 rounded px-1.5 py-0.5 text-[10px] font-bold text-white ${
+                label === '確定' ? 'bg-green-600' : 'bg-orange-500'
+              }`}
+            >
+              {label}
+            </span>
+          )}
+          {r.cooking_time_minutes != null && (
+            <span className="absolute bottom-1 right-1 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-bold text-white">
+              ⏱ {r.cooking_time_minutes}分
+            </span>
+          )}
+        </div>
+        <p className="mt-1.5 line-clamp-2 text-[13px] font-bold leading-snug text-gray-900">{title}</p>
+        <p className="mt-0.5 text-[11px] text-gray-500">
+          {sortNutrient
+            ? `${sortNutrient.label} ${fmtVal(nvN(r, sortNutrient.col, servings), sortNutrient.unit)}`
+            : fmtVal(kcal, 'kcal')}
+          {' ・ '}
+          {fmtVal(price, '円')}
+          {' ・ '}
+          {r.cook_count}回
+          {unresolved > 0 && <span className="ml-1 text-amber-600">※未計算あり</span>}
+        </p>
+      </Link>
+
+      {/* 献立候補の追加／外す（Linkの外に置いて、タップしても詳細へ飛ばないようにする） */}
+      <button
+        onClick={onTogglePlanned}
+        aria-label={r.is_planned ? '献立から外す' : '献立候補に追加'}
+        className={`absolute right-1.5 top-1.5 flex h-8 w-8 items-center justify-center rounded-full text-lg font-bold shadow ${
+          r.is_planned ? 'bg-orange-500 text-white' : 'bg-white/90 text-gray-700'
+        }`}
+      >
+        {r.is_planned ? '✓' : '＋'}
+      </button>
+    </div>
   )
 }
 
@@ -2182,28 +4397,29 @@ function ListCard({
   recipe: r,
   imageUrl,
   sortNutrient,
+  servings,
 }: {
   recipe: RecipeRow
   imageUrl?: string
   sortNutrient: SortNutrientInfo
+  servings: number
 }) {
   const genre = genreOf(r)
-  const kcal = nv(r, 'calorie_per_serving')
-  const price = nv(r, 'price_per_serving')
+  const kcal = nvN(r, 'calorie_per_serving', servings)
+  const price = nvN(r, 'price_per_serving', servings)
   const unresolved = unresolvedCount(r)
 
   return (
-    <Link to={`/recipes/${r.id}`} className="block rounded-xl bg-white shadow-sm active:opacity-70">
+    <Link to={`/recipes/${r.id}`} draggable={false} className="block rounded-xl bg-white shadow-sm active:opacity-70">
       <div className="flex items-center px-4 py-3">
-        {/* 左：①ジャンル＋作る予定 ②料理名 ③引用元（左揃え） */}
+        {/* 左：①ジャンル＋サブカテゴリ＋献立の状態 ②料理名 ③引用元（左揃え） */}
         <div className="min-w-0 flex-1 text-left">
           <div className="flex items-center gap-1.5">
-            <span className={`rounded px-2 py-0.5 text-[10px] font-semibold ${GENRE_COLOR[genre]}`}>{genre}</span>
-            {r.is_planned && (
-              <span className="shrink-0 rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-600">
-                作る予定
-              </span>
+            <span className={`shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold ${GENRE_COLOR[genre]}`}>{genre}</span>
+            {r.category && (
+              <span className="truncate rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">{r.category}</span>
             )}
+            <PlanBadge recipe={r} />
           </div>
           <div className="mt-1 truncate font-medium text-gray-800">{r.dish_name}</div>
           {r.source_name && <div className="mt-0.5 truncate text-xs text-gray-400">{r.source_name}</div>}
@@ -2212,7 +4428,7 @@ function ListCard({
         {/* 中央：サムネ（写真があるときだけ小さく） */}
         {imageUrl && (
           <div className="mx-2 h-11 w-11 shrink-0 overflow-hidden rounded-lg border border-gray-200 bg-gray-100">
-            <img src={imageUrl} alt={r.dish_name} loading="lazy" className="h-full w-full object-cover" />
+            <img src={imageUrl} alt={r.dish_name} loading="lazy" draggable={false} className="h-full w-full object-cover" />
           </div>
         )}
 
@@ -2221,7 +4437,7 @@ function ListCard({
           <div className="flex items-baseline justify-end gap-3 text-sm font-semibold">
             {sortNutrient ? (
               <span className="text-amber-600">
-                {sortNutrient.label} {fmtVal(nv(r, sortNutrient.col), sortNutrient.unit)}
+                {sortNutrient.label} {fmtVal(nvN(r, sortNutrient.col, servings), sortNutrient.unit)}
               </span>
             ) : (
               <span className="text-gray-700">{fmtVal(kcal, 'kcal')}</span>
@@ -2248,40 +4464,48 @@ function SkeletonCard() {
   )
 }
 
+// fill を付けると、1行に並べたとき均等な幅に広がる（横スクロールなしで収める用）
 function Chip({
   active,
   onClick,
+  fill,
   children,
 }: {
   active: boolean
   onClick: () => void
+  fill?: boolean
   children: React.ReactNode
 }) {
   return (
     <button
       onClick={onClick}
-      className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition ${
-        active ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-600'
-      }`}
+      className={`whitespace-nowrap rounded-full py-1 text-xs font-medium transition ${
+        fill ? 'min-w-0 flex-1 px-1 text-center' : 'px-3'
+      } ${active ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-600'}`}
     >
       {children}
     </button>
   )
 }
+..
 
-echo ..
 ===== src\pages\SettingsPage.tsx =====
 ..
-// ---------- src/pages/SettingsPage.tsx ----------
+// src/pages/SettingsPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// ※ もしここに「パスキー（FaceID）登録ボタン」などを自分で追加済みなら、全文を置き換えずに
+//    <ShoppingCategoryOrderSettings /> の1行と、その import だけを足してください。
 import { supabase } from '../supabaseClient'
+import ShoppingCategoryOrderSettings from '../components/ShoppingCategoryOrderSettings'
 
 export default function SettingsPage() {
   return (
     <div className="p-4">
       <h1 className="mb-4 text-lg font-bold">⚙️ 設定</h1>
 
-      {/* ★ 今あるパスキー(FaceID)登録ボタンは、ここへ移動してください */}
+      {/* 買い物リストのカテゴリ順 */}
+      <ShoppingCategoryOrderSettings />
 
+      {/* ★ 今あるパスキー(FaceID)登録ボタンは、ここへ移動してください */}
       <button
         onClick={() => supabase.auth.signOut()}
         className="w-full rounded-xl border border-red-300 py-3 font-bold text-red-600 active:bg-red-50"
@@ -2291,24 +4515,609 @@ export default function SettingsPage() {
     </div>
   )
 }
+..
 
-echo ..
 ===== src\pages\ShoppingPage.tsx =====
 ..
-// ---------- src/pages/ShoppingPage.tsx ----------
-export default function ShoppingPage() {
-  return <Placeholder icon="🛒" title="買い物リスト" />
+// src/pages/ShoppingPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 前提：10_shopping_migration.sql を実行済み
+// 買い物リスト：
+//   ・一番上の帯（タイトル・自動配置）はスクロールしても固定
+//   ・並びは「カテゴリ順（設定画面で変更可）」で自動配置 →「長押し → ドラッグ＆ドロップ」で手動で入れ替え
+//   ・タップ：カゴに入れた／戻す　　← 左スワイプ：削除（元に戻すメッセージあり）
+//   ・「自動配置」：手動で入れ替えた順をリセットして、カテゴリ順に並べ直す
+//   ・アプリを開き直したとき・別のアプリから戻ったときに、最新の内容を読み込み直す
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
+import { Link, useOutletContext } from 'react-router-dom'
+import type { Session } from '@supabase/supabase-js'
+import { supabase } from '../supabaseClient'
+import type { ShoppingItem } from '../types/shopping'
+import SwipeRow from '../components/SwipeRow'
+import type { SwipeAction } from '../components/SwipeRow'
+import { categoryRank, CATEGORY_BADGE, normalizeCategoryOrder } from '../lib/categoryOrder'
+import { fetchCategoryOrder, findShoppingListId, getHouseholdId } from '../lib/household'
+import { formatAmount } from '../lib/shoppingAggregate'
+import { errorText } from '../lib/errorText'
+import { computeToIndex, planSortOrder, shiftSlots } from '../lib/dragReorder'
+
+type Toast = { message: string; actionLabel: string; onAction: () => void }
+
+const SWIPE_DELETE: SwipeAction = { label: '削除', readyLabel: '離して削除', className: 'bg-red-500' }
+
+const LONG_PRESS_MS = 350 // この時間ずっと押していると、ドラッグ開始
+const MOVE_TOLERANCE = 8 // 押している間にこれ以上動いたら、長押しではなくスクロール／スワイプ扱い(px)
+const GAP = 4 // 行と行のすき間(px)。行の mb-1 と同じ
+
+// ドラッグ中の測定値
+type Rect = { id: string; top: number; height: number } // top はページ全体での位置
+type DragInfo = {
+  id: string
+  fromIndex: number // ドラッグ開始時の位置
+  startClientY: number // ドラッグ開始時の指の位置
+  oldScreenTop: number // ドラッグ開始時、行が画面上で見えていた位置
+  anchor: number | null // 行の見た目を指に合わせるための補正（測定後に決まる）
+  rects: Rect[] // 全行の位置（見出しを消したあとに測定）
 }
-function Placeholder({ icon, title }: { icon: string; title: string }) {
+type DragView = { t: number; toIndex: number; from: number; height: number }
+
+// 並び順（sort_order → 追加した順）
+function bySort(a: ShoppingItem, b: ShoppingItem): number {
+  return a.sort_order - b.sort_order || (a.created_at ?? '').localeCompare(b.created_at ?? '')
+}
+
+export default function ShoppingPage() {
+  const { session } = useOutletContext<{ session: Session }>()
+  const userId = session.user.id
+
+  const [items, setItems] = useState<ShoppingItem[]>([])
+  const [order, setOrder] = useState<string[]>(normalizeCategoryOrder(null))
+  const [listId, setListId] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [toast, setToast] = useState<Toast | null>(null)
+
+  // ドラッグ関連
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dragView, setDragView] = useState<DragView>({ t: 0, toIndex: 0, from: 0, height: 0 })
+  const dragRef = useRef<DragInfo | null>(null)
+  const toIndexRef = useRef(0)
+  const pressRef = useRef<{ id: string; x: number; y: number; timer: number } | null>(null)
+  const lastYRef = useRef(0)
+  const dragActiveRef = useRef(false)
+  const suppressClickUntil = useRef(0)
+  const rowEls = useRef(new Map<string, HTMLDivElement>())
+  const headerRef = useRef<HTMLDivElement>(null)
+
+  const load = useCallback(async () => {
+    try {
+      const householdId = await getHouseholdId(userId)
+      const [catOrder, id] = await Promise.all([fetchCategoryOrder(householdId), findShoppingListId(householdId)])
+      setOrder(catOrder)
+      setListId(id)
+      if (!id) {
+        setItems([])
+      } else {
+        const { data, error: e } = await supabase
+          .from('shopping_items')
+          .select('*')
+          .eq('shopping_list_id', id)
+          .order('sort_order', { ascending: true })
+        if (e) throw e
+        setItems((data ?? []) as ShoppingItem[])
+      }
+      setError(null)
+    } catch (e) {
+      setError(errorText(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [userId])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  // 別のアプリから戻ったとき（家族が追加した分など）に、最新を読み込み直す（ドラッグ中は除く）
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && !dragActiveRef.current) void load()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [load])
+
+  // 「元に戻す」メッセージは5秒で自動的に消す
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 5000)
+    return () => clearTimeout(t)
+  }, [toast])
+
+  const open = useMemo(() => items.filter((i) => !i.is_checked).sort(bySort), [items])
+  const checked = useMemo(() => items.filter((i) => i.is_checked).sort(bySort), [items])
+
+  // ドラッグ処理から最新の並びを読むための入れ物
+  const openRef = useRef<ShoppingItem[]>([])
+  useEffect(() => {
+    openRef.current = open
+  }, [open])
+
+  const patchLocal = (id: string, p: Partial<ShoppingItem>) =>
+    setItems((list) => list.map((i) => (i.id === id ? { ...i, ...p } : i)))
+
+  // ---- タップ：カゴに入れた／戻す ----
+  const toggleChecked = async (it: ShoppingItem) => {
+    const next = !it.is_checked
+    const p = {
+      is_checked: next,
+      checked_by: next ? userId : null,
+      checked_at: next ? new Date().toISOString() : null,
+    }
+    patchLocal(it.id, p)
+    const { data, error: e } = await supabase
+      .from('shopping_items')
+      .update({ ...p, updated_by: userId })
+      .eq('id', it.id)
+      .select('id')
+    if (e || !data || data.length === 0) {
+      patchLocal(it.id, { is_checked: it.is_checked, checked_by: it.checked_by, checked_at: it.checked_at })
+      alert('更新に失敗しました: ' + (e ? errorText(e) : '権限を確認してください'))
+    }
+  }
+
+  // ---- 左スワイプ：削除（元に戻せる） ----
+  const removeItem = async (it: ShoppingItem) => {
+    setItems((list) => list.filter((i) => i.id !== it.id))
+    const { data, error: e } = await supabase.from('shopping_items').delete().eq('id', it.id).select('id')
+    if (e || !data || data.length === 0) {
+      setItems((list) => [...list, it])
+      alert('削除に失敗しました: ' + (e ? errorText(e) : '権限を確認してください'))
+      return
+    }
+    setToast({
+      message: `「${it.item_name}」を削除しました`,
+      actionLabel: '元に戻す',
+      onAction: async () => {
+        setToast(null)
+        const { error: insErr } = await supabase.from('shopping_items').insert(it)
+        if (insErr) {
+          alert('元に戻せませんでした: ' + errorText(insErr))
+          return
+        }
+        setItems((list) => [...list, it])
+      },
+    })
+  }
+
+  // ---- 購入済み（カゴに入れた）をまとめて削除 ----
+  const clearChecked = async () => {
+    if (!listId || checked.length === 0) return
+    if (!window.confirm(`カゴに入れた ${checked.length}件 を削除しますか？`)) return
+    const { error: e } = await supabase
+      .from('shopping_items')
+      .delete()
+      .eq('shopping_list_id', listId)
+      .eq('is_checked', true)
+    if (e) {
+      alert('削除に失敗しました: ' + errorText(e))
+      return
+    }
+    setItems((list) => list.filter((i) => !i.is_checked))
+  }
+
+  // ---- 自動配置：カテゴリ順に並べ直す（手動で入れ替えた順はリセット） ----
+  const autoArrange = async () => {
+    if (!window.confirm('手動で入れ替えた順をリセットして、カテゴリ順に並べ直しますか？')) return
+    const sorted = [...items].sort(
+      (a, b) => categoryRank(order, a.category) - categoryRank(order, b.category) || bySort(a, b),
+    )
+    const next = sorted.map((it, idx) => ({ ...it, sort_order: (idx + 1) * 1000 }))
+    setItems(next)
+    const results = await Promise.all(
+      next.map((it) => supabase.from('shopping_items').update({ sort_order: it.sort_order }).eq('id', it.id)),
+    )
+    const failed = results.find((r) => r.error)
+    if (failed?.error) {
+      alert('並べ直しに失敗しました: ' + errorText(failed.error))
+      void load()
+    }
+  }
+
+  // =====================================================================
+  // 長押し → ドラッグ＆ドロップ
+  //   1) 行を350ms押し続ける（途中で動かすとスクロール／スワイプ扱いで中止）
+  //   2) 行が浮き上がる。ここから指を動かすと、行が指についてくる（画面の端に近づくと自動スクロール）
+  //   3) 指を離した位置に入る。動かしたのは1行だけ。前後の行の「並び順」の真ん中の値を入れる
+  // =====================================================================
+
+  // ドロップ：動かした行の並び順を決めて保存（計算は lib/dragReorder.ts）
+  const commitMove = useCallback(
+    async (id: string, toIndex: number) => {
+      const plan = planSortOrder(openRef.current, id, toIndex)
+      if (plan.kind === 'none') return
+
+      if (plan.kind === 'single') {
+        const value = plan.value
+        setItems((l) => l.map((i) => (i.id === id ? { ...i, sort_order: value } : i)))
+        const { error: e } = await supabase
+          .from('shopping_items')
+          .update({ sort_order: value, updated_by: userId })
+          .eq('id', id)
+        if (e) {
+          alert('並べ替えに失敗しました: ' + errorText(e))
+          void load()
+        }
+        return
+      }
+
+      // 前後の値が近すぎたときは、全部振り直す
+      const numbers = new Map(plan.orders.map((o) => [o.id, o.sort_order]))
+      setItems((l) => l.map((i) => (numbers.has(i.id) ? { ...i, sort_order: numbers.get(i.id) as number } : i)))
+      const results = await Promise.all(
+        plan.orders.map((o) => supabase.from('shopping_items').update({ sort_order: o.sort_order }).eq('id', o.id)),
+      )
+      const failed = results.find((r) => r.error)
+      if (failed?.error) {
+        alert('並べ替えに失敗しました: ' + errorText(failed.error))
+        void load()
+      }
+    },
+    [load, userId],
+  )
+
+  const cancelPress = () => {
+    const p = pressRef.current
+    if (p) {
+      window.clearTimeout(p.timer)
+      pressRef.current = null
+    }
+  }
+
+  // 長押しが成立したとき：ドラッグ開始
+  const startDrag = useCallback((id: string) => {
+    const el = rowEls.current.get(id)
+    const from = openRef.current.findIndex((i) => i.id === id)
+    if (!el || from < 0) return
+    pressRef.current = null
+    const r = el.getBoundingClientRect()
+    dragRef.current = {
+      id,
+      fromIndex: from,
+      startClientY: lastYRef.current,
+      oldScreenTop: r.top,
+      anchor: null,
+      rects: [],
+    }
+    toIndexRef.current = from
+    dragActiveRef.current = true // これ以降、画面のスクロールを止める
+    setDragView({ t: 0, toIndex: from, from, height: r.height })
+    setDragId(id)
+  }, [])
+
+  // ドラッグ終了（指を離した／中断された）
+  const finishDrag = useCallback(
+    (cancelled: boolean) => {
+      const d = dragRef.current
+      if (!d) return
+      const toIndex = toIndexRef.current
+      dragRef.current = null
+      dragActiveRef.current = false
+      suppressClickUntil.current = Date.now() + 400 // 指を離した瞬間のタップで「カゴに入れる」が働かないように
+      setDragId(null)
+      if (cancelled || toIndex === d.fromIndex) return
+      void commitMove(d.id, toIndex)
+    },
+    [commitMove],
+  )
+
+  // ① カテゴリ見出しが消えた直後に、全行の位置を測る（見出しの分だけ行がずれるので、指に合わせて補正）
+  useLayoutEffect(() => {
+    const d = dragRef.current
+    if (!dragId || !d) return
+    const rects: Rect[] = []
+    for (const it of openRef.current) {
+      const el = rowEls.current.get(it.id)
+      if (!el) continue
+      const r = el.getBoundingClientRect()
+      rects.push({ id: it.id, top: r.top + window.scrollY, height: r.height })
+    }
+    const me = rects.find((r) => r.id === dragId)
+    if (!me) return
+    d.rects = rects
+    d.anchor = d.oldScreenTop - me.top
+    setDragView({ t: d.anchor + window.scrollY, toIndex: d.fromIndex, from: d.fromIndex, height: me.height })
+  }, [dragId])
+
+  // ② ドラッグ中：毎フレーム、指の位置に行を合わせ、入る位置を計算（画面の端では自動スクロール）
+  useEffect(() => {
+    if (!dragId) return
+    let raf = 0
+    const tick = () => {
+      const d = dragRef.current
+      if (d && d.anchor !== null) {
+        const y = lastYRef.current
+        const topEdge = (headerRef.current?.getBoundingClientRect().bottom ?? 0) + 40
+        const bottomEdge = window.innerHeight - 120
+        if (y < topEdge) window.scrollBy(0, -Math.min(18, (topEdge - y) / 6 + 2))
+        else if (y > bottomEdge) window.scrollBy(0, Math.min(18, (y - bottomEdge) / 6 + 2))
+
+        const t = d.anchor + window.scrollY + (y - d.startClientY)
+        const me = d.rects.find((r) => r.id === d.id)
+        if (me) {
+          const toIndex = computeToIndex(d.rects, d.id, t)
+          toIndexRef.current = toIndex
+          setDragView((prev) =>
+            Math.abs(prev.t - t) < 0.5 && prev.toIndex === toIndex ? prev : { ...prev, t, toIndex },
+          )
+        }
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [dragId])
+
+  // ③ ドラッグ中の指の動き・離したことを、画面全体で受け取る
+  useEffect(() => {
+    if (!dragId) return
+    const move = (e: PointerEvent) => {
+      lastYRef.current = e.clientY
+    }
+    const up = () => finishDrag(false)
+    const cancel = () => finishDrag(true)
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', cancel)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', cancel)
+    }
+  }, [dragId, finishDrag])
+
+  // ④ ドラッグ中は、画面が縦にスクロールしないようにする（iPhoneなどのタッチ操作用）
+  useEffect(() => {
+    const block = (e: TouchEvent) => {
+      if (dragActiveRef.current && e.cancelable) e.preventDefault()
+    }
+    window.addEventListener('touchmove', block, { passive: false })
+    return () => window.removeEventListener('touchmove', block)
+  }, [])
+
+  // 画面を離れるときの後片付け
+  useEffect(() => {
+    return () => {
+      const p = pressRef.current
+      if (p) window.clearTimeout(p.timer)
+      dragActiveRef.current = false
+    }
+  }, [])
+
+  // 行の上での指の動き（長押しの判定）
+  const onRowPointerDown = (e: ReactPointerEvent<HTMLDivElement>, id: string) => {
+    if (dragRef.current) return
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    cancelPress()
+    lastYRef.current = e.clientY
+    const timer = window.setTimeout(() => startDrag(id), LONG_PRESS_MS)
+    pressRef.current = { id, x: e.clientX, y: e.clientY, timer }
+  }
+  const onRowPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    lastYRef.current = e.clientY
+    const p = pressRef.current
+    if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > MOVE_TOLERANCE) cancelPress()
+  }
+  // ドラッグ直後のクリックは無効にする（ドロップした瞬間に「カゴに入れる」が働かないように）
+  const onRowClickCapture = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (Date.now() < suppressClickUntil.current) {
+      e.preventDefault()
+      e.stopPropagation()
+    }
+  }
+
   return (
-    <div className="flex flex-col items-center justify-center pt-32 text-gray-400">
-      <div className="text-5xl">{icon}</div>
-      <p className="mt-3 font-bold">{title}</p>
-      <p className="text-xs">準備中</p>
+    <div className="min-h-screen bg-gray-50 pb-6">
+      {/* 一番上の帯（スクロールしても固定） */}
+      <div
+        ref={headerRef}
+        className="sticky top-0 z-40 flex items-center gap-2 border-b border-gray-200 bg-white px-3 py-2"
+      >
+        <h1 className="text-sm font-bold text-gray-900">🛒 買い物リスト</h1>
+        <span className="rounded-full bg-gray-200 px-1.5 text-[11px] font-semibold text-gray-600">{open.length}</span>
+        <span className="ml-auto text-[10px] text-gray-400">長押しで並べ替え</span>
+        <button
+          onClick={autoArrange}
+          disabled={open.length < 2}
+          className="shrink-0 rounded-full border border-gray-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-gray-600 disabled:opacity-40"
+        >
+          自動配置
+        </button>
+      </div>
+
+      {error && <p className="px-4 py-2 text-sm text-red-600">読み込みエラー：{error}</p>}
+
+      {loading ? (
+        <div className="space-y-1.5 p-2">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="h-11 animate-pulse rounded-lg bg-gray-200" />
+          ))}
+        </div>
+      ) : (
+        <div className="px-2">
+          {items.length === 0 && !error && (
+            <div className="px-4 py-12 text-center text-sm text-gray-400">
+              <p>買い物リストは空です</p>
+              <p className="mt-1 text-xs">
+                <Link to="/menu" className="text-amber-600 underline">
+                  献立
+                </Link>
+                の「🛒 買い物リストに追加」から、確定した料理の材料を入れられます
+              </p>
+            </div>
+          )}
+
+          {/* 買うもの */}
+          {open.map((it, idx) => {
+            const isDragged = dragId === it.id
+            // ドラッグ中は見出しを隠す（並べ替え中は、カテゴリをまたいで自由に動かせるため）
+            const showHeader = !dragId && (idx === 0 || open[idx - 1].category !== it.category)
+
+            let style: CSSProperties | undefined
+            if (dragId) {
+              if (isDragged) {
+                style = {
+                  transform: `translateY(${dragView.t}px) scale(1.02)`,
+                  zIndex: 30,
+                  position: 'relative',
+                  boxShadow: '0 8px 20px rgba(0,0,0,0.25)',
+                  borderRadius: 12,
+                }
+              } else {
+                // 動かしている行の前後にいる行は、1行ぶん上下にずれて場所を空ける
+                const slots = shiftSlots(idx, dragView.from, dragView.toIndex)
+                style = {
+                  transform: `translateY(${slots * (dragView.height + GAP)}px)`,
+                  transition: 'transform 150ms ease-out',
+                }
+              }
+            }
+
+            return (
+              <div key={it.id}>
+                {showHeader && <CategoryHeader category={it.category} />}
+                <div
+                  ref={(el) => {
+                    if (el) rowEls.current.set(it.id, el)
+                    else rowEls.current.delete(it.id)
+                  }}
+                  className="mb-1 select-none [-webkit-touch-callout:none]"
+                  style={style}
+                  onPointerDown={(e) => onRowPointerDown(e, it.id)}
+                  onPointerMove={onRowPointerMove}
+                  onPointerUp={cancelPress}
+                  onPointerCancel={cancelPress}
+                  onClickCapture={onRowClickCapture}
+                  onContextMenu={(e) => e.preventDefault()}
+                >
+                  <SwipeRow left={SWIPE_DELETE} onSwipeLeft={() => removeItem(it)} disabled={dragId !== null}>
+                    <ItemRow item={it} onToggle={() => toggleChecked(it)} />
+                  </SwipeRow>
+                </div>
+              </div>
+            )
+          })}
+
+          {/* カゴに入れた */}
+          {checked.length > 0 && (
+            <div className="mt-4">
+              <div className="mb-1 flex items-center gap-1.5 px-1">
+                <h2 className="text-sm font-bold text-gray-500">🧺 カゴに入れた</h2>
+                <span className="rounded-full bg-gray-200 px-1.5 text-[11px] font-semibold text-gray-600">
+                  {checked.length}
+                </span>
+                <button
+                  onClick={clearChecked}
+                  className="ml-auto rounded-full border border-red-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-red-500"
+                >
+                  すべて削除
+                </button>
+              </div>
+              {checked.map((it) => (
+                <div key={it.id} className="mb-1">
+                  <SwipeRow left={SWIPE_DELETE} onSwipeLeft={() => removeItem(it)}>
+                    <ItemRow item={it} onToggle={() => toggleChecked(it)} />
+                  </SwipeRow>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {open.length > 0 && (
+            <p className="mt-3 px-1 text-[10px] text-gray-400">
+              タップ：カゴに入れる　←左スワイプ：削除　長押し：並べ替え
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* 削除のあとに出る「元に戻す」メッセージ */}
+      {toast && (
+        <div
+          className="pointer-events-none fixed inset-x-0 z-50 flex justify-center px-3"
+          style={{ bottom: 'calc(4.5rem + env(safe-area-inset-bottom))' }}
+        >
+          <div className="pointer-events-auto flex max-w-md items-center gap-3 rounded-xl bg-gray-900 px-4 py-2.5 text-sm text-white shadow-lg">
+            <span className="min-w-0 flex-1 truncate">{toast.message}</span>
+            <button onClick={toast.onAction} className="shrink-0 font-bold text-amber-300">
+              {toast.actionLabel}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
-echo ..
+
+function CategoryHeader({ category }: { category: string }) {
+  return (
+    <div className="mb-0.5 mt-2 px-1">
+      <span className={`rounded px-2 py-0.5 text-[11px] font-bold ${CATEGORY_BADGE[category] ?? CATEGORY_BADGE['その他']}`}>
+        {category}
+      </span>
+    </div>
+  )
+}
+
+// ---------- 買い物の1行（コンパクト：名前＋どのレシピ用か／右に数量） ----------
+function ItemRow({ item, onToggle }: { item: ShoppingItem; onToggle: () => void }) {
+  const done = item.is_checked
+  const amount = formatAmount(item.quantity, item.unit)
+  return (
+    <div className="flex items-center gap-2 bg-white px-3 py-1.5">
+      <button
+        onClick={onToggle}
+        aria-label={done ? 'カゴから戻す' : 'カゴに入れる'}
+        className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+      >
+        <span
+          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[11px] font-bold ${
+            done ? 'border-amber-500 bg-amber-500 text-white' : 'border-gray-300 bg-white text-transparent'
+          }`}
+        >
+          ✓
+        </span>
+        <span className="min-w-0 flex-1">
+          <span
+            className={`block truncate text-sm font-medium leading-tight ${done ? 'text-gray-400 line-through' : 'text-gray-800'}`}
+          >
+            {item.item_name}
+          </span>
+          {item.note && <span className="block truncate text-[10px] leading-tight text-gray-400">{item.note}</span>}
+        </span>
+        <span className={`shrink-0 whitespace-nowrap text-sm font-semibold ${done ? 'text-gray-400' : 'text-gray-700'}`}>
+          {amount}
+        </span>
+      </button>
+    </div>
+  )
+}
+..
+
+===== src\types\cookLog.ts =====
+..
+// src/types/cookLog.ts（新規作成）
+// 「作った」履歴の型定義（テーブル: cook_logs）
+export type CookLog = {
+  id: string
+  household_id: string
+  recipe_id: string
+  cooked_on: string // 作った日（2026-10-06 の形）
+  cooked_by: string | null
+  created_at: string
+}
+..
+
 ===== src\types\ingredient.ts =====
 ..
 export type IngredientCategory =
@@ -2363,13 +5172,15 @@ export interface IngredientMaster {
   created_at: string;
   updated_at: string;
   
-}
-echo ..
+}..
+
 ===== src\types\recipe.ts =====
 ..
-// src/types/recipe.ts（Recipe型にcooking_time_minutes / cook_countを追加）
+// src/types/recipe.ts（ファイル全体。これで丸ごと置き換えてください）
+// 変更点：Recipe型に plan_confirmed（献立に確定済みかどうか）を追加
 // ファイル: src/types/recipe.ts
 // レシピ関連の型定義
+
 export type Recipe = {
   id: string
   household_id: string
@@ -2384,10 +5195,11 @@ export type Recipe = {
   original_servings: number | null
   calories_per_serving: number | null
   cost_per_serving: number | null
-  cooking_time_minutes: number | null // ★追加：調理時間(分)
-  cook_count: number                  // ★追加：作成回数
+  cooking_time_minutes: number | null // 調理時間(分)
+  cook_count: number                  // 作成回数
   image_path: string | null
-  is_planned: boolean
+  is_planned: boolean                 // 献立に入っている（候補 or 確定）
+  plan_confirmed: boolean             // ★追加：献立に確定済み（is_planned が true のときだけ意味を持つ）
   planned_by: string | null
   planned_at: string | null
   registration_method: string | null
@@ -2421,5 +5233,29 @@ export type RecipeWithDetail = Recipe & {
   ingredients: Ingredient[]
   steps: Step[]
 }
+..
 
-echo ..
+===== src\types\shopping.ts =====
+..
+// src/types/shopping.ts（新規作成）
+// 買い物リストの型定義（テーブル: shopping_items）
+export type ShoppingItem = {
+  id: string
+  shopping_list_id: string
+  ingredient_master_id: string | null
+  recipe_id: string | null
+  item_name: string
+  quantity: string | null
+  unit: string | null
+  is_checked: boolean
+  checked_by: string | null
+  checked_at: string | null
+  created_by: string | null
+  updated_by: string | null
+  category: string // 野菜・肉・魚介…（材料マスタのカテゴリ）
+  sort_order: number // 並び順（小さいほど上。手動で入れ替えられる）
+  note: string | null // どのレシピ用か（例：肉じゃが・カレーライス）
+  created_at: string
+}
+..
+

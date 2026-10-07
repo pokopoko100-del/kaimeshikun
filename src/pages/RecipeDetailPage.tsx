@@ -1,8 +1,13 @@
 // src/pages/RecipeDetailPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：recipe_nutrition ビュー（01）、recipes.plan_confirmed 列（09）、cook_logs テーブル（11）を作成済みであること
+// 前提：12_ingredients_by_step.sql（steps.tip / ingredients.step_id / ingredients.group_label）を実行済みであること
 // 今回の変更：
-//  ・「🍳 作った履歴」を追加。献立で「作った」にした日付が、新しい順に並ぶ（11 を実行した後の分から）
+//  ・材料を「工程ごと」に表示（使う順）。「① 工程名 → 材料 → → 本文 → POINT」の並び
+//  ・材料のグループ記号（A・B…）をオレンジの丸バッジで表示。工程の本文中の [A] もバッジにする
+//  ・工程に紐付いていない材料（古いレシピなど）は、これまで通り「材料」「作り方」を別々に表示
+//    （一部だけ紐付いている場合は、紐付いていない材料を「その他の材料」として先頭に表示）
 // これまでの内容：
+//  ・「🍳 作った履歴」：献立で「作った」にした日付が、新しい順に並ぶ
 //  ・人数を変えられる（「－ 2人前 ＋」。レシピ一覧・献立と共通の設定）。カロリー・費用・栄養素・材料の分量が連動
 //  ・献立候補トグル（未追加／候補／確定）。追加は「候補」から。確定・作ったは献立画面で行う
 //  ・カロリー／費用／栄養素は recipe_nutrition ビュー（材料マスタから計算）から表示
@@ -25,6 +30,9 @@ import { useServings } from '../lib/useServings'
 type IngredientRow = Ingredient & {
   ingredient_master: { default_unit: string | null; unit_weight_g: number | null } | null
 }
+
+// 工程の中の材料のまとまり（グループ記号 A・B… がある材料は、同じ記号どうしで1つにまとめる）
+type IngBlock = { label: string | null; items: IngredientRow[] }
 
 // recipe_nutrition ビューの1行
 type NutritionRow = Record<string, number | string | null>
@@ -106,6 +114,30 @@ function nvPer(row: NutritionRow | null, col: string, servings: number): number 
 // 材料マスタの列名 → ビューの列名（xxx_per_100g → xxx_per_serving）
 function servingCol(key: string): string {
   return key.replace('_per_100g', '_per_serving')
+}
+
+// 工程の材料を、表示用のまとまりに分ける（並びは sort_order のまま。同じ記号 A は1か所に集める）
+function buildBlocks(list: IngredientRow[]): IngBlock[] {
+  const blocks: IngBlock[] = []
+  for (const ing of list) {
+    const label = ing.group_label
+    if (label) {
+      const found = blocks.find((b) => b.label === label)
+      if (found) {
+        found.items.push(ing)
+      } else {
+        blocks.push({ label, items: [ing] })
+      }
+    } else {
+      const last = blocks[blocks.length - 1]
+      if (last && last.label === null) {
+        last.items.push(ing)
+      } else {
+        blocks.push({ label: null, items: [ing] })
+      }
+    }
+  }
+  return blocks
 }
 
 // 栄養素の表示グループ（カロリーは上のカードに出すので除外）
@@ -258,6 +290,22 @@ export default function RecipeDetailPage() {
     )
     return { main, micro }
   }, [])
+
+  // 材料を工程ごとに分ける。1つも工程に紐付いていないレシピは、これまで通りの表示にする
+  const stepLayout = useMemo(() => {
+    const stepIds = new Set(steps.map((s) => s.id))
+    const byStep = new Map<string, IngredientRow[]>()
+    const others: IngredientRow[] = []
+    const linked = ingredients.some((i) => i.step_id != null && stepIds.has(i.step_id))
+    for (const ing of ingredients) {
+      if (linked && ing.step_id != null && stepIds.has(ing.step_id)) {
+        byStep.set(ing.step_id, [...(byStep.get(ing.step_id) ?? []), ing])
+      } else {
+        others.push(ing)
+      }
+    }
+    return { linked, byStep, others }
+  }, [ingredients, steps])
 
   if (loading) {
     return (
@@ -434,59 +482,73 @@ export default function RecipeDetailPage() {
           )}
         </section>
 
-        {/* 材料 */}
-        <section className="mt-6">
-          <h2 className="font-semibold text-gray-800 mb-2">
-            材料({servings}人前)
-            {servings !== recipe.servings && (
-              <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
+        {stepLayout.linked ? (
+          /* 材料と作り方：工程ごと（使う順） */
+          <section className="mt-6">
+            <h2 className="font-semibold text-gray-800 mb-2">
+              材料と作り方({servings}人前)
+              {servings !== recipe.servings && (
+                <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
+              )}
+            </h2>
+            {stepLayout.others.length > 0 && (
+              <div className="mb-3 rounded-xl bg-white p-3 shadow-sm">
+                <p className="mb-1 text-xs font-semibold text-gray-500">その他の材料</p>
+                <StepIngredients list={stepLayout.others} factor={factor} unresolvedSet={unresolvedSet} />
+              </div>
             )}
-          </h2>
-          {ingredients.length === 0 ? (
-            <p className="text-sm text-gray-400">材料情報はありません。</p>
-          ) : (
-            <ul className="bg-white rounded-xl shadow-sm divide-y divide-gray-100">
-              {ingredients.map((ing) => (
-                <li key={ing.id} className="flex justify-between px-4 py-2 text-sm">
-                  <span className="text-gray-700">
-                    {ing.ingredient_name}
-                    {ing.preparation && <span className="text-gray-400">({ing.preparation})</span>}
-                    {unresolvedSet.has(ing.id) && (
-                      <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
-                        未計算
-                      </span>
-                    )}
-                  </span>
-                  <span className="text-gray-500">{formatAmount(scaleQuantity(ing.quantity, factor), ing.unit)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        {/* 作り方 */}
-        <section className="mt-6">
-          <h2 className="font-semibold text-gray-800 mb-2">作り方</h2>
-          {steps.length === 0 ? (
-            <p className="text-sm text-gray-400">工程情報はありません。</p>
-          ) : (
             <ol className="space-y-3">
               {steps.map((step) => (
-                <li key={step.id} className="bg-white rounded-xl shadow-sm p-3">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="w-6 h-6 flex items-center justify-center rounded-full bg-amber-500 text-white text-xs font-semibold">
-                      {step.step_number}
-                    </span>
-                    {step.step_name && (
-                      <span className="font-medium text-gray-800 text-sm">{step.step_name}</span>
-                    )}
-                  </div>
-                  {step.description && <p className="text-sm text-gray-600 pl-8">{step.description}</p>}
-                </li>
+                <StepCard
+                  key={step.id}
+                  step={step}
+                  ingredients={stepLayout.byStep.get(step.id) ?? []}
+                  factor={factor}
+                  unresolvedSet={unresolvedSet}
+                />
               ))}
             </ol>
-          )}
-        </section>
+          </section>
+        ) : (
+          <>
+            {/* 材料 */}
+            <section className="mt-6">
+              <h2 className="font-semibold text-gray-800 mb-2">
+                材料({servings}人前)
+                {servings !== recipe.servings && (
+                  <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
+                )}
+              </h2>
+              {ingredients.length === 0 ? (
+                <p className="text-sm text-gray-400">材料情報はありません。</p>
+              ) : (
+                <div className="rounded-xl bg-white px-4 py-1 shadow-sm">
+                  <StepIngredients list={ingredients} factor={factor} unresolvedSet={unresolvedSet} />
+                </div>
+              )}
+            </section>
+
+            {/* 作り方 */}
+            <section className="mt-6">
+              <h2 className="font-semibold text-gray-800 mb-2">作り方</h2>
+              {steps.length === 0 ? (
+                <p className="text-sm text-gray-400">工程情報はありません。</p>
+              ) : (
+                <ol className="space-y-3">
+                  {steps.map((step) => (
+                    <StepCard
+                      key={step.id}
+                      step={step}
+                      ingredients={[]}
+                      factor={factor}
+                      unresolvedSet={unresolvedSet}
+                    />
+                  ))}
+                </ol>
+              )}
+            </section>
+          </>
+        )}
 
         {/* 作った履歴（献立で「作った」にした日付） */}
         <section className="mt-6">
@@ -551,5 +613,136 @@ function NutrientLine({ label, value, indent }: { label: string; value: string; 
       <span className={indent ? 'pl-4 text-gray-500' : ''}>{label}</span>
       <span>{value}</span>
     </div>
+  )
+}
+
+// ---------- 工程ごとの表示部品 ----------
+
+// グループ記号（A・B…）のオレンジの丸バッジ
+function GroupBadge({ label, small }: { label: string; small?: boolean }) {
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center justify-center rounded-full bg-orange-500 font-bold text-white ${
+        small ? 'mx-0.5 h-4 w-4 align-middle text-[10px]' : 'h-5 w-5 text-[11px]'
+      }`}
+    >
+      {label}
+    </span>
+  )
+}
+
+// 工程の本文：[A] の部分だけバッジにする（例：「[A]を入れる」→「Ⓐを入れる」）
+function StepText({ text }: { text: string }) {
+  const parts = text.split(/\[([A-Z])\]/) // 奇数番目が、かっこの中の記号
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? <GroupBadge key={i} label={part} small /> : <span key={i}>{part}</span>,
+      )}
+    </>
+  )
+}
+
+// 材料1行（名前＋下処理＋未計算マーク／右に分量）
+function IngredientLine({
+  ing,
+  factor,
+  unresolved,
+}: {
+  ing: IngredientRow
+  factor: number
+  unresolved: boolean
+}) {
+  return (
+    <li className="flex justify-between gap-2 py-1 text-sm">
+      <span className="min-w-0 text-gray-700">
+        {ing.ingredient_name}
+        {ing.preparation && <span className="text-gray-400">({ing.preparation})</span>}
+        {unresolved && (
+          <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+            未計算
+          </span>
+        )}
+      </span>
+      <span className="shrink-0 text-gray-500">{formatAmount(scaleQuantity(ing.quantity, factor), ing.unit)}</span>
+    </li>
+  )
+}
+
+// 材料のかたまり：記号なしの材料はそのまま並べ、記号（A・B…）がある材料は、バッジ付きの囲みにまとめる
+function StepIngredients({
+  list,
+  factor,
+  unresolvedSet,
+}: {
+  list: IngredientRow[]
+  factor: number
+  unresolvedSet: Set<string>
+}) {
+  const blocks = buildBlocks(list)
+  return (
+    <div>
+      {blocks.map((b, i) =>
+        b.label ? (
+          <div key={i} className="my-1 flex items-start gap-2 rounded-lg bg-orange-50 px-2 py-1">
+            <span className="mt-1">
+              <GroupBadge label={b.label} />
+            </span>
+            <ul className="min-w-0 flex-1 divide-y divide-orange-100">
+              {b.items.map((ing) => (
+                <IngredientLine key={ing.id} ing={ing} factor={factor} unresolved={unresolvedSet.has(ing.id)} />
+              ))}
+            </ul>
+          </div>
+        ) : (
+          <ul key={i} className="divide-y divide-gray-100">
+            {b.items.map((ing) => (
+              <IngredientLine key={ing.id} ing={ing} factor={factor} unresolved={unresolvedSet.has(ing.id)} />
+            ))}
+          </ul>
+        ),
+      )}
+    </div>
+  )
+}
+
+// 工程のカード：① 工程名 → 材料 → → 本文 → POINT
+function StepCard({
+  step,
+  ingredients,
+  factor,
+  unresolvedSet,
+}: {
+  step: Step
+  ingredients: IngredientRow[]
+  factor: number
+  unresolvedSet: Set<string>
+}) {
+  return (
+    <li className="rounded-xl bg-white p-3 shadow-sm">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-500 text-xs font-semibold text-white">
+          {step.step_number}
+        </span>
+        {step.step_name && <span className="text-sm font-medium text-gray-800">{step.step_name}</span>}
+      </div>
+      {ingredients.length > 0 && (
+        <div className="mb-1 pl-8">
+          <StepIngredients list={ingredients} factor={factor} unresolvedSet={unresolvedSet} />
+        </div>
+      )}
+      {step.description && (
+        <p className="pl-8 text-sm leading-relaxed text-gray-600">
+          <span className="mr-1 font-bold text-amber-500">→</span>
+          <StepText text={step.description} />
+        </p>
+      )}
+      {step.tip && (
+        <div className="ml-8 mt-2 rounded-lg bg-yellow-50 px-3 py-2 text-xs leading-relaxed text-yellow-800">
+          <span className="mr-1 font-bold">💡 POINT</span>
+          <StepText text={step.tip} />
+        </div>
+      )}
+    </li>
   )
 }

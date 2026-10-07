@@ -1,5 +1,6 @@
 // src/types/recipe.ts（ファイル全体。これで丸ごと置き換えてください）
-// 変更点：Recipe型に plan_confirmed（献立に確定済みかどうか）を追加
+// 変更点：Ingredient型に step_id・group_label、Step型に tip を追加（12_ingredients_by_step.sql に対応）
+// （以前の変更点：Recipe型に plan_confirmed を追加）
 // ファイル: src/types/recipe.ts
 // レシピ関連の型定義
 
@@ -41,6 +42,8 @@ export type Ingredient = {
   unit: string | null
   note: string | null
   preparation: string | null
+  step_id: string | null // どの工程で使うか（空なら工程に紐付いていない）
+  group_label: string | null // グループ記号（A・B…）。空なら記号なし
 }
 
 export type Step = {
@@ -49,6 +52,7 @@ export type Step = {
   step_number: number
   step_name: string | null
   description: string | null
+  tip: string | null // POINT（コツ）
 }
 
 export type RecipeWithDetail = Recipe & {
