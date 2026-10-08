@@ -1,5 +1,10 @@
+
 // src/pages/MasterPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の修正：
+// 前提：ingredient_units テーブル（複数単位の対応）を作成済みであること
+// 今回の変更：
+//  ・材料を開いたとき、「単位」の追加・編集・削除フォームを表示（大さじ・小さじ・個・枚…を何個でも登録）
+//    基準の単位を変えたときは、材料マスタの default_unit / unit_weight_g も自動でそろえる（一覧の「1単位あたり」表示に反映）
+// これまでの修正：
 //  ① 一覧の左側を「分類＋旬」→「材料名」→「銘柄」の3段・左揃えに変更
 //  ② 「100gあたり」を上部に固定表示し、各レコードの「/ 100g」を削除
 //  ③ 右側の数値を「117kcal  40円」（大きめ）＋「（大さじ1：21kcal, 7.2円）」（小さめ）の2段表示に変更
@@ -9,6 +14,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../supabaseClient';
 import type { IngredientCategory, IngredientMaster } from '../types/ingredient';
 import { NUTRIENT_INFO_LIST, getNutrientInfo } from '../data/nutrientInfo';
+import IngredientUnitsEditor from '../components/IngredientUnitsEditor';
+import type { UnitRow } from '../components/IngredientUnitsEditor';
 
 const CATEGORIES: IngredientCategory[] = [
   '野菜',
@@ -175,6 +182,9 @@ export default function MasterPage() {
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
   const [lightbox, setLightbox] = useState<Lightbox | null>(null);
   const [uploadingId, setUploadingId] = useState<string | null>(null);
+  // 材料ごとの単位表（材料ID → 単位の一覧）。読み込みに失敗したときは undefined のまま
+  const [unitsByMaster, setUnitsByMaster] = useState<Record<string, UnitRow[]> | null>(null);
+  const [unitsFailed, setUnitsFailed] = useState(false);
 
   useEffect(() => {
     const fetchIngredients = async () => {
@@ -196,6 +206,23 @@ export default function MasterPage() {
       const list = (data ?? []) as IngredientMaster[];
       setItems(list);
       setLoading(false);
+
+      // 単位表：読めなくても材料の一覧は表示する（開いたときに案内を出す）
+      const { data: unitData, error: unitError } = await supabase
+        .from('ingredient_units')
+        .select('id, ingredient_master_id, unit, weight_g, is_default, sort_order')
+        .range(0, 4999);
+      if (unitError) {
+        console.error(unitError);
+        setUnitsFailed(true);
+      } else {
+        const grouped: Record<string, UnitRow[]> = {};
+        (unitData ?? []).forEach((u) => {
+          const row = { ...(u as UnitRow), weight_g: Number((u as UnitRow).weight_g) };
+          (grouped[row.ingredient_master_id] ??= []).push(row);
+        });
+        setUnitsByMaster(grouped);
+      }
 
       // 非公開バケットなので、画像がある材料の署名付きURLをまとめて発行（1時間有効）
       const paths = list
@@ -252,6 +279,18 @@ export default function MasterPage() {
   const handleSelectAll = () => {
     setSelectedCategory('すべて');
     setSeasonOnly(false);
+  };
+
+  // 単位の編集後：この材料の単位一覧を差し替える
+  const handleUnitsChange = (masterId: string, units: UnitRow[]) => {
+    setUnitsByMaster((prev) => ({ ...(prev ?? {}), [masterId]: units }));
+  };
+
+  // 基準の単位が変わったとき：一覧の「1単位あたり」表示にも反映する
+  const handleDefaultChange = (masterId: string, unit: string | null, weightG: number | null) => {
+    setItems((prev) =>
+      prev.map((i) => (i.id === masterId ? { ...i, default_unit: unit, unit_weight_g: weightG } : i)),
+    );
   };
 
   // いつもの商品の画像を登録（圧縮→Storageへアップロード→DBにパス保存→旧画像を削除）
@@ -545,8 +584,6 @@ export default function MasterPage() {
                   {isExpanded && (
                     <div className="border-t border-gray-100 px-4 py-3 text-sm">
                       <div className="mb-2 grid grid-cols-2 gap-x-4 gap-y-1 text-gray-600">
-                        <div>既定の単位：{item.default_unit ?? '―'}</div>
-                        <div>1単位の重さ：{fmt(item.unit_weight_g, 'g')}</div>
                         <div>いつもの商品：{item.usual_product_name ?? '―'}</div>
                         <div>購入店：{item.store_name ?? '―'}</div>
                         <div className="col-span-2">
@@ -564,6 +601,20 @@ export default function MasterPage() {
                             '通年（特になし）'
                           )}
                         </div>
+                      </div>
+
+                      {/* 単位の追加・編集・削除 */}
+                      <div className="mb-2">
+                        {unitsByMaster === null && !unitsFailed ? (
+                          <p className="text-xs text-gray-400">単位を読み込み中…</p>
+                        ) : (
+                          <IngredientUnitsEditor
+                            item={item}
+                            units={unitsFailed ? undefined : (unitsByMaster?.[item.id] ?? [])}
+                            onUnitsChange={handleUnitsChange}
+                            onDefaultChange={handleDefaultChange}
+                          />
+                        )}
                       </div>
 
                       {/* いつもの商品の画像：登録・変更・削除 */}

@@ -1,9 +1,11 @@
+
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：リスト表示のスワイプを「右スワイプ」で献立候補に追加／献立から外す に変更（これまでは左スワイプ）
 // 前提：recipe_nutrition ビュー（01）と、recipes.plan_confirmed 列（09）を作成済みであること
 // 機能：
 //  ・検索ボックスの右横に、写真／リスト切替
 //  ・ジャンル（すべて・和食・洋食・中華・エスニック・その他）を1行、サブカテゴリ（6分類）を1行
-//  ・リスト表示：カードを左へスワイプ →「献立候補」に追加／献立から外す（離すと確定）
+//  ・リスト表示：カードを右へスワイプ →「献立候補」に追加／献立から外す（離すと確定）
 //  ・値は、右上の人数（共通設定）あたりで表示。「－ 2人前 ＋」で変更（詳細・献立画面と共通）
 //  ・写真表示：サムネ右上の＋ボタンで 候補に追加／外す
 //  ・追加／解除のあとに「元に戻す」付きのメッセージを数秒表示
@@ -483,7 +485,7 @@ export default function RecipeListPage() {
         <div className="mt-2 flex items-center justify-between gap-2 text-xs text-gray-500">
           <span className="shrink-0">{loading ? '読み込み中…' : `${sorted.length}件`}</span>
           <span className="min-w-0 truncate text-[10px] text-gray-400">
-            {viewMode === 'list' ? '← 左スワイプで献立候補に追加' : '右上の＋で献立候補に追加'}
+            {viewMode === 'list' ? '右スワイプで献立候補に追加 →' : '右上の＋で献立候補に追加'}
           </span>
           <ServingsStepper value={servings} onChange={setServings} />
         </div>
@@ -519,8 +521,8 @@ export default function RecipeListPage() {
             : sorted.map((r) => (
                 <SwipeRow
                   key={r.id}
-                  left={r.is_planned ? SWIPE_REMOVE : SWIPE_ADD}
-                  onSwipeLeft={() => togglePlanned(r)}
+                  right={r.is_planned ? SWIPE_REMOVE : SWIPE_ADD}
+                  onSwipeRight={() => togglePlanned(r)}
                 >
                   <ListCard
                     recipe={r}
@@ -572,7 +574,7 @@ function PlanBadge({ recipe }: { recipe: Pick<Recipe, 'is_planned' | 'plan_confi
   )
 }
 
-// ---------- スワイプ時の表示（左スワイプ：献立候補に追加／献立から外す） ----------
+// ---------- スワイプ時の表示（右スワイプ：献立候補に追加／献立から外す） ----------
 const SWIPE_ADD: SwipeAction = { label: '＋ 献立候補', readyLabel: '離して追加', className: 'bg-orange-500' }
 const SWIPE_REMOVE: SwipeAction = { label: '献立から外す', readyLabel: '離して外す', className: 'bg-gray-500' }
 

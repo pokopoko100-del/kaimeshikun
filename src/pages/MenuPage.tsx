@@ -1,5 +1,6 @@
+
 // src/pages/MenuPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：①家族が候補・確定を変えたとき、すぐ画面に反映（Supabase Realtime）／②空欄メッセージのスワイプ方向を修正（レシピ一覧は左スワイプ）
+// 今回の変更：①家族が候補・確定を変えたとき、すぐ画面に反映（Supabase Realtime）／②空欄メッセージを「レシピ一覧で右スワイプ」に統一（レシピ一覧のスワイプを右向きに変更したため）
 // 前提：09_menu_status_migration.sql（plan_confirmed 列）と 11_cook_logs_migration.sql（cook_logs テーブル）を実行済み
 // 献立画面：日割りなし。「確定」と「候補」の2つのリストを、小さな行（料理名＋引用元）で並べる（ボタンなし・スワイプで操作）
 //   【候補】 → 右スワイプ：確定に追加 ／ ← 左スワイプ：削除（献立から外す。レシピは残る）
@@ -398,7 +399,7 @@ export default function MenuPage() {
           <div className="mt-4" />
           <SectionTitle icon="💭" title="候補" count={candidates.length} hint="→確定 ←削除" />
           {candidates.length === 0 ? (
-            <Empty text="候補はありません（レシピ一覧で左スワイプ／＋で追加）" />
+            <Empty text="候補はありません（レシピ一覧で右スワイプ／＋で追加）" />
           ) : (
             <div className="space-y-1">
               {candidates.map((r) => (

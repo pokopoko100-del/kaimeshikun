@@ -1,19 +1,21 @@
 
 // src/pages/RecipeDetailPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：「未計算」の判定を、材料マスタの単位表（ingredient_units）に合わせた（recipe_nutrition ビューの第2段階と同じルール）
 // 前提：recipe_nutrition ビュー（01）、recipes.plan_confirmed 列（09）、cook_logs テーブル（11）を作成済みであること
 // 前提：12_ingredients_by_step.sql（steps.tip / ingredients.step_id / ingredients.group_label）を実行済みであること
+// 前提：ingredient_units テーブル（複数単位の対応）を作成済みであること
 // 今回の変更：
-//  ・材料を「工程ごと」に表示（使う順）。「① 工程名 → 材料 → → 本文 → POINT」の並び
-//  ・材料のグループ記号（A・B…）をオレンジの丸バッジで表示。工程の本文中の [A] もバッジにする
-//  ・工程に紐付いていない材料（古いレシピなど）は、これまで通り「材料」「作り方」を別々に表示
-//    （一部だけ紐付いている場合は、紐付いていない材料を「その他の材料」として先頭に表示）
+//  ・一番上に固定の帯（スクロールしても動かない）
+//      1行目：左＝「← 戻る」／右＝「追加」「履歴（回数つき）」「栄養素」ボタン
+//      2行目：料理名。その下に小さく「参照元・時間・カロリー・費用」
+//  ・「履歴」「栄養素」は、ボタンを押すと下から出る画面で表示（これまで本文に並んでいた内容を移動）
+//  ・「追加」は献立候補の追加／外す。押したあとに「元に戻す」付きのメッセージを表示
+//  ・材料は、新しい形式（工程ごとに材料が紐付いたレシピ）でも、まず全部の材料を「材料」表にまとめて表示
+//    その下の「作り方」に、各工程で使う材料 ＋ 作り方を表示（古い形式のレシピは、作り方のみ）
+//  ・人数切替（－ ○人前 ＋）は「材料」の見出しの右に移動（カロリー・費用・分量が連動。一覧・献立と共通の設定）
 // これまでの内容：
-//  ・「🍳 作った履歴」：献立で「作った」にした日付が、新しい順に並ぶ
-//  ・人数を変えられる（「－ 2人前 ＋」。レシピ一覧・献立と共通の設定）。カロリー・費用・栄養素・材料の分量が連動
-//  ・献立候補トグル（未追加／候補／確定）。追加は「候補」から。確定・作ったは献立画面で行う
+//  ・材料のグループ記号（A・B…）をオレンジの丸バッジで表示。工程の本文中の [A] もバッジにする
 //  ・カロリー／費用／栄養素は recipe_nutrition ビュー（材料マスタから計算）から表示
-//  ・計算できていない材料には「未計算」マーク
+//  ・計算できていない材料には「未計算」マーク（判定は材料マスタの単位表 ingredient_units に合わせてある）
 //  ・分量は「大さじ3」のように、大さじ・小さじは単位を先頭に表示
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom'
@@ -38,10 +40,19 @@ type IngredientRow = Ingredient & {
 }
 
 // 工程の中の材料のまとまり（グループ記号 A・B… がある材料は、同じ記号どうしで1つにまとめる）
-type IngBlock = { label: string | null; items: IngredientRow[] }
+type IngBlock = { label: string | null; stepId: string | null; items: IngredientRow[] }
 
 // recipe_nutrition ビューの1行
 type NutritionRow = Record<string, number | string | null>
+
+// 献立の状態（追加／外す、「元に戻す」で書き込む列）
+type PlanPatch = {
+  is_planned: boolean
+  plan_confirmed: boolean
+  planned_by: string | null
+  planned_at: string | null
+}
+type Toast = { message: string; onUndo: () => void }
 
 const LOG_PREVIEW = 10 // 作った履歴は、最初は新しい順に10件だけ表示
 
@@ -131,18 +142,19 @@ function buildBlocks(list: IngredientRow[]): IngBlock[] {
   for (const ing of list) {
     const label = ing.group_label
     if (label) {
-      const found = blocks.find((b) => b.label === label)
+      // 同じ記号でも、別の工程の材料はまとめない（全材料の表でも、工程ごとのA・Bが混ざらないように）
+      const found = blocks.find((b) => b.label === label && b.stepId === ing.step_id)
       if (found) {
         found.items.push(ing)
       } else {
-        blocks.push({ label, items: [ing] })
+        blocks.push({ label, stepId: ing.step_id, items: [ing] })
       }
     } else {
       const last = blocks[blocks.length - 1]
       if (last && last.label === null) {
         last.items.push(ing)
       } else {
-        blocks.push({ label: null, items: [ing] })
+        blocks.push({ label: null, stepId: ing.step_id, items: [ing] })
       }
     }
   }
@@ -176,10 +188,18 @@ export default function RecipeDetailPage() {
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [togglingPlanned, setTogglingPlanned] = useState(false)
-  const [showNutrients, setShowNutrients] = useState(false)
+  const [sheet, setSheet] = useState<'history' | 'nutrition' | null>(null) // 下から出る画面（履歴／栄養素）
+  const [toast, setToast] = useState<Toast | null>(null)
   const [servings, setServings] = useServings() // 何人前で表示するか（共通設定）
 
   const imageUrl = useRecipeImage(recipe?.image_path ?? null)
+
+  // 「元に戻す」メッセージは4秒で自動的に消す
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 4000)
+    return () => clearTimeout(t)
+  }, [toast])
 
   useEffect(() => {
     if (!id) return
@@ -257,28 +277,44 @@ export default function RecipeDetailPage() {
     }
   }, [id])
 
-  // 献立候補の追加／外す。追加は「候補」から。外すときは確定も解除する
-  const handleTogglePlanned = async () => {
-    if (!recipe) return
+  // 献立の状態を書き込む（成功したら画面にも反映）。「元に戻す」にも使う
+  const writePlan = async (next: PlanPatch): Promise<boolean> => {
+    if (!recipe) return false
     setTogglingPlanned(true)
-    const adding = !recipe.is_planned
-    const { data, error } = await supabase
-      .from('recipes')
-      .update({
-        is_planned: adding,
-        plan_confirmed: false,
-        planned_by: adding ? session.user.id : null,
-        planned_at: adding ? new Date().toISOString() : null,
-      })
-      .eq('id', recipe.id)
-      .select('id')
+    const { data, error } = await supabase.from('recipes').update(next).eq('id', recipe.id).select('id')
     setTogglingPlanned(false)
-
     if (error || !data || data.length === 0) {
       alert('更新に失敗しました: ' + (error?.message ?? '権限を確認してください'))
-      return
+      return false
     }
-    setRecipe({ ...recipe, is_planned: adding, plan_confirmed: false })
+    setRecipe((r) => (r ? { ...r, ...next } : r))
+    return true
+  }
+
+  // 献立候補の追加／外す。追加は「候補」から。外すときは確定も解除する（確定・作ったは献立画面で行う）
+  const handleTogglePlanned = async () => {
+    if (!recipe || togglingPlanned) return
+    const before: PlanPatch = {
+      is_planned: recipe.is_planned,
+      plan_confirmed: recipe.plan_confirmed,
+      planned_by: recipe.planned_by,
+      planned_at: recipe.planned_at,
+    }
+    const adding = !recipe.is_planned
+    const ok = await writePlan({
+      is_planned: adding,
+      plan_confirmed: false,
+      planned_by: adding ? session.user.id : null,
+      planned_at: adding ? new Date().toISOString() : null,
+    })
+    if (!ok) return
+    setToast({
+      message: adding ? '献立候補に追加しました' : '献立から外しました',
+      onUndo: () => {
+        void writePlan(before)
+        setToast(null)
+      },
+    })
   }
 
   // 未計算の材料（分量が「適量」などのものは数えない）
@@ -300,20 +336,16 @@ export default function RecipeDetailPage() {
     return { main, micro }
   }, [])
 
-  // 材料を工程ごとに分ける。1つも工程に紐付いていないレシピは、これまで通りの表示にする
-  const stepLayout = useMemo(() => {
+  // 作り方の各工程に出す材料（工程に紐付いたものだけ）。1つも紐付いていないレシピ（古い形式）は、工程に材料を出さない
+  const stepIngredients = useMemo(() => {
     const stepIds = new Set(steps.map((s) => s.id))
     const byStep = new Map<string, IngredientRow[]>()
-    const others: IngredientRow[] = []
-    const linked = ingredients.some((i) => i.step_id != null && stepIds.has(i.step_id))
     for (const ing of ingredients) {
-      if (linked && ing.step_id != null && stepIds.has(ing.step_id)) {
+      if (ing.step_id != null && stepIds.has(ing.step_id)) {
         byStep.set(ing.step_id, [...(byStep.get(ing.step_id) ?? []), ing])
-      } else {
-        others.push(ing)
       }
     }
-    return { linked, byStep, others }
+    return byStep
   }, [ingredients, steps])
 
   if (loading) {
@@ -344,6 +376,7 @@ export default function RecipeDetailPage() {
   const costN = costPer != null ? costPer * servings : null
   const factor = servings / recipe.servings // 材料の分量を増減する倍率
   const unresolvedCount = unresolvedSet.size
+  const uncertain = unresolvedCount > 0 || nutritionFailed // 計算に含まれていない材料がある
 
   // 献立の状態：未追加／候補／確定
   const planState: 'none' | 'candidate' | 'confirmed' = !recipe.is_planned
@@ -357,6 +390,71 @@ export default function RecipeDetailPage() {
 
   return (
     <div className="max-w-md mx-auto pb-6">
+      {/* ===== 一番上に固定：①ボタンの帯 ②料理名＋参照元・時間・カロリー・費用 ===== */}
+      <header className="sticky top-0 z-40 border-b border-gray-200 bg-white px-3 pb-2 pt-2 shadow-sm">
+        {/* ①左：戻る ／ 右：追加・履歴（回数つき）・栄養素 */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => navigate('/recipes')}
+            aria-label="一覧に戻る"
+            className="shrink-0 rounded-full bg-gray-100 px-3 py-1.5 text-sm font-semibold text-gray-700 active:bg-gray-200"
+          >
+            ← 戻る
+          </button>
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            <button
+              onClick={handleTogglePlanned}
+              disabled={togglingPlanned}
+              aria-label={
+                planState === 'none'
+                  ? '献立候補に追加する'
+                  : planState === 'candidate'
+                    ? '献立候補から外す'
+                    : '献立から外す'
+              }
+              className={`whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-bold disabled:opacity-50 ${
+                planState === 'none'
+                  ? 'bg-amber-500 text-white'
+                  : planState === 'candidate'
+                    ? 'border border-amber-400 bg-amber-100 text-amber-700'
+                    : 'border border-green-400 bg-green-100 text-green-700'
+              }`}
+            >
+              {planState === 'none' && '＋ 追加'}
+              {planState === 'candidate' && '✓ 候補'}
+              {planState === 'confirmed' && '✓ 確定'}
+            </button>
+            <button
+              onClick={() => setSheet('history')}
+              className="whitespace-nowrap rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 active:bg-gray-100"
+            >
+              🍳 履歴 {recipe.cook_count}
+            </button>
+            <button
+              onClick={() => setSheet('nutrition')}
+              className="whitespace-nowrap rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 active:bg-gray-100"
+            >
+              栄養素
+            </button>
+          </div>
+        </div>
+
+        {/* ②料理名 ＋ 下に小さく：参照元・時間・カロリー・費用（選んだ人数ぶん） */}
+        <h1 className="mt-1.5 truncate text-lg font-bold leading-tight text-gray-900">{recipe.dish_name}</h1>
+        <p className="mt-0.5 flex items-center gap-1 text-[11px] leading-tight text-gray-500">
+          {recipe.source_name && <span className="min-w-0 truncate">{recipe.source_name}</span>}
+          <span className="shrink-0 whitespace-nowrap">
+            {recipe.source_name ? '・' : ''}⏱ {recipe.cooking_time_minutes != null ? `${recipe.cooking_time_minutes}分` : '―'}
+            {' ・ '}
+            {fmtVal(kcalN, 'kcal')}
+            {' ・ '}
+            {fmtVal(costN, '円')}
+            {uncertain && <span className="text-amber-600">※</span>}
+            <span className="text-gray-400">（{servings}人前）</span>
+          </span>
+        </p>
+      </header>
+
       {/* 写真 */}
       <div className="w-full h-56 bg-gray-100 flex items-center justify-center">
         {imageUrl ? (
@@ -367,204 +465,70 @@ export default function RecipeDetailPage() {
       </div>
 
       <div className="p-4">
-        {/* 戻るボタン */}
-        <button onClick={() => navigate('/recipes')} className="text-sm text-gray-500 mb-3">
-          ← 一覧に戻る
-        </button>
-
-        <h1 className="text-xl font-bold text-gray-900">{recipe.dish_name}</h1>
         {(recipe.genre || recipe.category) && (
-          <p className="text-sm text-gray-400 mt-0.5">
+          <p className="text-xs text-gray-400">
             {recipe.genre}
             {recipe.genre && recipe.category ? ' ・ ' : ''}
             {recipe.category}
           </p>
         )}
-        <p className="text-xs text-gray-400 mt-1">
-          ⏱ {recipe.cooking_time_minutes != null ? `${recipe.cooking_time_minutes}分` : '―'}
-          {' ・ '}
-          {recipe.cook_count}回作った
-        </p>
 
-        {/* 献立候補トグル（確定・作ったは献立画面で行う） */}
-        <button
-          onClick={handleTogglePlanned}
-          disabled={togglingPlanned}
-          className={`mt-4 w-full rounded-lg py-2.5 font-semibold transition disabled:opacity-50 ${
-            planState === 'none'
-              ? 'bg-amber-500 text-white'
-              : planState === 'candidate'
-                ? 'bg-amber-100 text-amber-700 border border-amber-400'
-                : 'bg-green-100 text-green-700 border border-green-400'
-          }`}
-        >
-          {planState === 'none' && '献立候補に追加する'}
-          {planState === 'candidate' && '✓ 献立候補に入っています(タップで外す)'}
-          {planState === 'confirmed' && '✓ 献立に確定済みです(タップで外す)'}
-        </button>
-        {planState !== 'none' && (
-          <p className="mt-1 text-center text-[11px] text-gray-400">
-            確定・作ったの操作は、下の「献立」タブで行えます
-          </p>
-        )}
-
-        {/* 人数の切替（カロリー・費用・栄養素・材料の分量に反映） */}
-        <div className="mt-4 flex items-center justify-between">
-          <span className="text-sm font-semibold text-gray-800">何人前で見る？</span>
-          <ServingsStepper value={servings} onChange={setServings} />
-        </div>
-
-        {/* カロリー・費用（材料マスタから計算。選んだ人数ぶん） */}
-        <div className="grid grid-cols-2 gap-3 mt-3">
-          <div className="bg-white rounded-xl shadow-sm p-3 text-center">
-            <p className="text-xs text-gray-400">カロリー({servings}人前)</p>
-            <p className="text-lg font-semibold text-gray-800">{fmtVal(kcalN, 'kcal')}</p>
-            {servings !== 1 && kcalPer != null && (
-              <p className="text-xs text-gray-400">1人前 {fmtVal(kcalPer, 'kcal')}</p>
-            )}
-          </div>
-          <div className="bg-white rounded-xl shadow-sm p-3 text-center">
-            <p className="text-xs text-gray-400">費用({servings}人前)</p>
-            <p className="text-lg font-semibold text-gray-800">{fmtVal(costN, '円')}</p>
-            {servings !== 1 && costPer != null && (
-              <p className="text-xs text-gray-400">1人前 {fmtVal(costPer, '円')}</p>
-            )}
-          </div>
-        </div>
-
-        {/* 計算できなかったときの注意 */}
-        {nutritionFailed && (
-          <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-            栄養・費用の計算ビュー（recipe_nutrition）を読み込めませんでした。
-          </p>
-        )}
-        {unresolvedCount > 0 && (
-          <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-            ※ 計算できていない材料が{unresolvedCount}件あります（下の材料に「未計算」と表示）。その分は金額・栄養に含まれていません。
-          </p>
-        )}
-        <p className="mt-2 text-[11px] text-gray-400">
-          ※ 材料マスタの単価・栄養価から計算した目安です。
-        </p>
-
-        {/* 栄養素（タップで開閉） */}
-        <section className="mt-4">
-          <button
-            onClick={() => setShowNutrients((v) => !v)}
-            className="flex w-full items-center justify-between rounded-xl bg-white px-4 py-3 shadow-sm"
-          >
-            <span className="font-semibold text-gray-800">栄養素（{servings}人前）</span>
-            <span className="text-sm text-gray-400">{showNutrients ? '閉じる ▲' : '開く ▼'}</span>
-          </button>
-
-          {showNutrients && (
-            <div className="mt-2 rounded-xl bg-white px-4 py-3 text-sm shadow-sm">
-              {nutrition == null ? (
-                <p className="text-gray-400">栄養データがありません。</p>
-              ) : (
-                <>
-                  <div className="mb-1 text-xs font-semibold text-gray-500">栄養価</div>
-                  {nutrientRows.main.map((n) => (
-                    <NutrientLine
-                      key={String(n.key)}
-                      label={n.label}
-                      indent={INDENT_KEYS.includes(String(n.key))}
-                      value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
-                    />
-                  ))}
-                  <div className="mb-1 mt-3 border-t border-gray-100 pt-2 text-xs font-semibold text-gray-500">
-                    ビタミン・ミネラル
-                  </div>
-                  {nutrientRows.micro.map((n) => (
-                    <NutrientLine
-                      key={String(n.key)}
-                      label={n.label}
-                      value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
-                    />
-                  ))}
-                  <p className="mt-3 text-[11px] text-gray-400">
-                    ※ マスタに値が入っていない材料は、その栄養素の合計に含まれません。
-                  </p>
-                </>
-              )}
-            </div>
-          )}
-        </section>
-
-        {stepLayout.linked ? (
-          /* 材料と作り方：工程ごと（使う順） */
-          <section className="mt-6">
-            <h2 className="font-semibold text-gray-800 mb-2">
-              材料と作り方({servings}人前)
+        {/* 材料表（新しい形式のレシピでも、まず全部の材料をここにまとめて表示） */}
+        <section className="mt-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h2 className="font-semibold text-gray-800">
+              材料
               {servings !== recipe.servings && (
                 <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
               )}
             </h2>
-            {stepLayout.others.length > 0 && (
-              <div className="mb-3 rounded-xl bg-white p-3 shadow-sm">
-                <p className="mb-1 text-xs font-semibold text-gray-500">その他の材料</p>
-                <StepIngredients list={stepLayout.others} factor={factor} unresolvedSet={unresolvedSet} />
-              </div>
-            )}
+            <ServingsStepper value={servings} onChange={setServings} />
+          </div>
+          {ingredients.length === 0 ? (
+            <p className="text-sm text-gray-400">材料情報はありません。</p>
+          ) : (
+            <div className="rounded-xl bg-white px-4 py-1 shadow-sm">
+              <StepIngredients list={ingredients} factor={factor} unresolvedSet={unresolvedSet} />
+            </div>
+          )}
+        </section>
+
+        {/* 作り方（新しい形式なら、各工程に「その工程で使う材料」も表示） */}
+        <section className="mt-6">
+          <h2 className="font-semibold text-gray-800 mb-2">作り方</h2>
+          {steps.length === 0 ? (
+            <p className="text-sm text-gray-400">工程情報はありません。</p>
+          ) : (
             <ol className="space-y-3">
               {steps.map((step) => (
                 <StepCard
                   key={step.id}
                   step={step}
-                  ingredients={stepLayout.byStep.get(step.id) ?? []}
+                  ingredients={stepIngredients.get(step.id) ?? []}
                   factor={factor}
                   unresolvedSet={unresolvedSet}
                 />
               ))}
             </ol>
+          )}
+        </section>
+
+        {/* 参考元情報 */}
+        {(recipe.source_name || recipe.source_url) && (
+          <section className="mt-6 text-xs text-gray-400">
+            <p>参考元: {recipe.source_name}</p>
+            {recipe.source_url && (
+              <a href={recipe.source_url} target="_blank" rel="noreferrer" className="underline break-all">
+                {recipe.source_url}
+              </a>
+            )}
           </section>
-        ) : (
-          <>
-            {/* 材料 */}
-            <section className="mt-6">
-              <h2 className="font-semibold text-gray-800 mb-2">
-                材料({servings}人前)
-                {servings !== recipe.servings && (
-                  <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
-                )}
-              </h2>
-              {ingredients.length === 0 ? (
-                <p className="text-sm text-gray-400">材料情報はありません。</p>
-              ) : (
-                <div className="rounded-xl bg-white px-4 py-1 shadow-sm">
-                  <StepIngredients list={ingredients} factor={factor} unresolvedSet={unresolvedSet} />
-                </div>
-              )}
-            </section>
-
-            {/* 作り方 */}
-            <section className="mt-6">
-              <h2 className="font-semibold text-gray-800 mb-2">作り方</h2>
-              {steps.length === 0 ? (
-                <p className="text-sm text-gray-400">工程情報はありません。</p>
-              ) : (
-                <ol className="space-y-3">
-                  {steps.map((step) => (
-                    <StepCard
-                      key={step.id}
-                      step={step}
-                      ingredients={[]}
-                      factor={factor}
-                      unresolvedSet={unresolvedSet}
-                    />
-                  ))}
-                </ol>
-              )}
-            </section>
-          </>
         )}
+      </div>
 
-        {/* 作った履歴（献立で「作った」にした日付） */}
-        <section className="mt-6">
-          <h2 className="font-semibold text-gray-800 mb-2">
-            🍳 作った履歴
-            <span className="ml-2 text-xs font-normal text-gray-400">{recipe.cook_count}回</span>
-          </h2>
+      {/* 履歴（作った日付。新しい順） */}
+      {sheet === 'history' && (
+        <Sheet title={`🍳 作った履歴（${recipe.cook_count}回）`} onClose={() => setSheet(null)}>
           {cookLogsFailed ? (
             <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
               作った履歴を読み込めませんでした（11_cook_logs_migration.sql を実行済みか確認してください）。
@@ -575,7 +539,7 @@ export default function RecipeDetailPage() {
             </p>
           ) : (
             <>
-              <ul className="bg-white rounded-xl shadow-sm divide-y divide-gray-100">
+              <ul className="divide-y divide-gray-100 rounded-xl border border-gray-100">
                 {shownLogs.map((log) => (
                   <li key={log.id} className="px-4 py-2 text-sm text-gray-700">
                     {formatCookedDate(log.cooked_on)}
@@ -597,19 +561,110 @@ export default function RecipeDetailPage() {
               )}
             </>
           )}
-        </section>
+        </Sheet>
+      )}
 
-        {/* 参考元情報 */}
-        {(recipe.source_name || recipe.source_url) && (
-          <section className="mt-6 text-xs text-gray-400">
-            <p>参考元: {recipe.source_name}</p>
-            {recipe.source_url && (
-              <a href={recipe.source_url} target="_blank" rel="noreferrer" className="underline break-all">
-                {recipe.source_url}
-              </a>
+      {/* 栄養素（カロリー・費用の内訳 ＋ 栄養価） */}
+      {sheet === 'nutrition' && (
+        <Sheet title={`栄養素（${servings}人前）`} onClose={() => setSheet(null)}>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-xl bg-gray-50 p-3 text-center">
+              <p className="text-xs text-gray-400">カロリー({servings}人前)</p>
+              <p className="text-lg font-semibold text-gray-800">{fmtVal(kcalN, 'kcal')}</p>
+              {servings !== 1 && kcalPer != null && (
+                <p className="text-xs text-gray-400">1人前 {fmtVal(kcalPer, 'kcal')}</p>
+              )}
+            </div>
+            <div className="rounded-xl bg-gray-50 p-3 text-center">
+              <p className="text-xs text-gray-400">費用({servings}人前)</p>
+              <p className="text-lg font-semibold text-gray-800">{fmtVal(costN, '円')}</p>
+              {servings !== 1 && costPer != null && (
+                <p className="text-xs text-gray-400">1人前 {fmtVal(costPer, '円')}</p>
+              )}
+            </div>
+          </div>
+          {nutritionFailed && (
+            <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              栄養・費用の計算ビュー（recipe_nutrition）を読み込めませんでした。
+            </p>
+          )}
+          {unresolvedCount > 0 && (
+            <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              ※ 計算できていない材料が{unresolvedCount}件あります（材料に「未計算」と表示）。その分は金額・栄養に含まれていません。
+            </p>
+          )}
+          <p className="mt-2 text-[11px] text-gray-400">※ 材料マスタの単価・栄養価から計算した目安です。</p>
+
+          <div className="mt-3 border-t border-gray-100 pt-3 text-sm">
+            {nutrition == null ? (
+              <p className="text-gray-400">栄養データがありません。</p>
+            ) : (
+              <>
+                <div className="mb-1 text-xs font-semibold text-gray-500">栄養価</div>
+                {nutrientRows.main.map((n) => (
+                  <NutrientLine
+                    key={String(n.key)}
+                    label={n.label}
+                    indent={INDENT_KEYS.includes(String(n.key))}
+                    value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
+                  />
+                ))}
+                <div className="mb-1 mt-3 border-t border-gray-100 pt-2 text-xs font-semibold text-gray-500">
+                  ビタミン・ミネラル
+                </div>
+                {nutrientRows.micro.map((n) => (
+                  <NutrientLine
+                    key={String(n.key)}
+                    label={n.label}
+                    value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
+                  />
+                ))}
+                <p className="mt-3 text-[11px] text-gray-400">
+                  ※ マスタに値が入っていない材料は、その栄養素の合計に含まれません。
+                </p>
+              </>
             )}
-          </section>
-        )}
+          </div>
+        </Sheet>
+      )}
+
+      {/* 追加／外したあとに出る「元に戻す」メッセージ */}
+      {toast && (
+        <div
+          className="pointer-events-none fixed inset-x-0 z-50 flex justify-center px-3"
+          style={{ bottom: 'calc(4.5rem + env(safe-area-inset-bottom))' }}
+        >
+          <div className="pointer-events-auto flex max-w-md items-center gap-3 rounded-xl bg-gray-900 px-4 py-2.5 text-sm text-white shadow-lg">
+            <span className="min-w-0 flex-1 truncate">{toast.message}</span>
+            <button onClick={toast.onUndo} className="shrink-0 font-bold text-amber-300">
+              元に戻す
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 下から出てくる画面（履歴・栄養素）。外側をタップするか「閉じる」で閉じる
+function Sheet({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-end bg-black/40 sm:items-center sm:justify-center"
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[85vh] w-full overflow-y-auto rounded-t-2xl bg-white px-4 pt-4 sm:max-w-md sm:rounded-2xl"
+        style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h3 className="min-w-0 truncate text-base font-bold text-gray-900">{title}</h3>
+          <button onClick={onClose} className="shrink-0 rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-500">
+            閉じる
+          </button>
+        </div>
+        {children}
       </div>
     </div>
   )
