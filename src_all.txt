@@ -311,7 +311,7 @@ export default function Layout({ session }: { session: Session }) {
 .
 .
 ===== src\components\LoginPage.tsx =====
-..
+.
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
 
@@ -424,10 +424,10 @@ export default function LoginPage() {
       </div>
     </div>
   )
-}
+}echo ..
 ..
 ===== src\components\ServingsStepper.tsx =====
-echo ...
+
 // src/components/ServingsStepper.tsx（新規作成）
 // 「－ 2人前 ＋」の人数切替ボタン
 import { MAX_SERVINGS, MIN_SERVINGS } from '../lib/useServings'
@@ -463,10 +463,10 @@ export default function ServingsStepper({
     </div>
   )
 }
-
+echo ..
 ..
 ===== src\components\ShoppingAddSheet.tsx =====
-echo ...
+
 // src/components/ShoppingAddSheet.tsx（新規作成）
 // 「買い物リストに追加」の確認画面（全画面）
 //   確定した献立の材料を合計して一覧表示 → 選択／削除／数量変更 → 「確定して買い物リストへ追加」
@@ -773,10 +773,10 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
     </div>
   )
 }
-
+echo ..
 ..
 ===== src\components\ShoppingCategoryOrderSettings.tsx =====
-echo ...
+
 // src/components/ShoppingCategoryOrderSettings.tsx（新規作成）
 // 設定画面の「買い物リストのカテゴリ順」（▲▼で入れ替え。変更するとすぐ保存される）
 import { useEffect, useState } from 'react'
@@ -892,10 +892,10 @@ export default function ShoppingCategoryOrderSettings() {
     </section>
   )
 }
-
+echo ..
 ..
 ===== src\components\SwipeRow.tsx =====
-echo ...
+
 // src/components/SwipeRow.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 左右にスワイプできる行。離したときに一定以上動いていたら、その向きの操作を実行する。
 //   左スワイプ（指を右→左）… onSwipeLeft  を実行（右側にラベルが現れる）
@@ -1050,10 +1050,10 @@ export default function SwipeRow({
     </div>
   )
 }
-
+echo ..
 ..
 ===== src\data\nutrientInfo.ts =====
-echo ...
+
 
 import type { IngredientMaster } from '../types/ingredient';
 
@@ -1268,10 +1268,10 @@ export function getNutrientInfo(key: keyof IngredientMaster) {
   return NUTRIENT_INFO_LIST.find((n) => n.key === key) ?? null;
 }
 
-
+echo ..
 ..
 ===== src\lib\categoryOrder.ts =====
-echo ...
+
 // src/lib/categoryOrder.ts（新規作成）
 // 買い物リストのカテゴリ順（設定画面で変更できる）に関する共通部品
 
@@ -1322,10 +1322,10 @@ export const CATEGORY_BADGE: Record<string, string> = {
   その他: 'bg-gray-100 text-gray-700',
   日用品: 'bg-purple-100 text-purple-700',
 }
-
+echo ..
 ..
 ===== src\lib\dates.ts =====
-echo ...
+
 // src/lib/dates.ts（新規作成）
 // 日付まわりの共通部品（「作った日」の保存と表示に使う）
 
@@ -1346,10 +1346,10 @@ export function formatCookedDate(ymd: string): string {
   const w = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()]
   return `${m[1]}/${m[2]}/${m[3]}（${w}）`
 }
-
+echo ..
 ..
 ===== src\lib\dragReorder.ts =====
-echo ...
+
 // src/lib/dragReorder.ts（新規作成）
 // 買い物リストの「長押しドラッグで並べ替え」の計算だけを切り出した部品（画面に依存しない）
 
@@ -1399,10 +1399,10 @@ export function planSortOrder(list: { id: string; sort_order: number }[], id: st
   ordered.splice(toIndex, 0, moved)
   return { kind: 'renumber', orders: ordered.map((it, i) => ({ id: it.id, sort_order: (i + 1) * 1000 })) }
 }
-
+echo ..
 ..
 ===== src\lib\errorText.ts =====
-echo ...
+
 // src/lib/errorText.ts（新規作成）
 // どんな形のエラーでも、画面に出せる文字列にする
 export function errorText(e: unknown): string {
@@ -1412,10 +1412,10 @@ export function errorText(e: unknown): string {
   }
   return '不明なエラー'
 }
-
+echo ..
 ..
 ===== src\lib\household.ts =====
-echo ...
+
 // src/lib/household.ts（新規作成）
 // 世帯（家族グループ）まわりのDB操作：世帯ID・買い物リストのID・カテゴリ順の読み書き
 import { supabase } from '../supabaseClient'
@@ -1486,10 +1486,10 @@ export async function getOrCreateShoppingListId(householdId: string, userId: str
   if (error) throw error
   return data.id as string
 }
-
+echo ..
 ..
 ===== src\lib\shoppingAggregate.ts =====
-echo ...
+
 // src/lib/shoppingAggregate.ts（新規作成）
 // 確定した献立の材料を、買い物用に合計する（画面に依存しない計算だけの部品）
 //   ・同じ材料は合算（例：玉ねぎ 200g ＋ 100g → 300g）
@@ -1692,10 +1692,10 @@ export function aggregateIngredients(
   for (const g of groups.values()) out.push(...buildItems(g))
   return out
 }
-
+echo ..
 ..
 ===== src\lib\shoppingList.ts =====
-echo ...
+
 // src/lib/shoppingList.ts（新規作成）
 // 買い物リストへ材料を追加する処理
 //   ・すでにリストにある（未購入の）同じ材料・同じ単位は、数量を足して1行にまとめる
@@ -1798,10 +1798,10 @@ export async function addItemsToShoppingList(params: {
 
   return { inserted: toInsert.length, merged: updates.size }
 }
-
+echo ..
 ..
 ===== src\lib\shoppingOrder.ts =====
-echo ...
+
 // src/lib/shoppingOrder.ts（新規作成）
 // 買い物リストに新しい材料を足すときの「自動配置」の計算（画面に依存しない部品）
 //   ・新しい材料は、カテゴリ順（設定画面の順）に合う位置に差し込む
@@ -1848,10 +1848,10 @@ export function computeSortOrders(
   }
   return result
 }
-
+echo ..
 ..
 ===== src\lib\supabaseStorage.ts =====
-echo ...
+
 // ファイル: src/lib/supabaseStorage.ts
 // recipe-images バケット(非公開)から、期限付きの閲覧URLを取得する
 
@@ -1874,10 +1874,10 @@ export async function getRecipeImageUrl(imagePath: string | null): Promise<strin
   }
 
   return data.signedUrl
-}
+}echo ..
 ..
 ===== src\lib\useRecipeImage.ts =====
-echo ...
+
 // ファイル: src/lib/useRecipeImage.ts
 // レシピ写真のURLを取得するReactフック(署名付きURLをstateで保持)
 
@@ -1905,10 +1905,10 @@ export function useRecipeImage(imagePath: string | null) {
   }, [imagePath])
 
   return url
-}
+}echo ..
 ..
 ===== src\lib\useServings.ts =====
-echo ...
+
 // src/lib/useServings.ts（新規作成）
 // 「何人前で表示するか」を、レシピ一覧・レシピ詳細・献立で共通に使うためのフック。
 // 選んだ人数は端末に保存され、次回も同じ人数で開きます（最初は1人前）。
@@ -1934,10 +1934,10 @@ export function useServings(): [number, (n: number) => void] {
 
   return [servings, change]
 }
-
+echo ..
 ..
 ===== src\pages\MasterPage.tsx =====
-echo ...
+
 // src/pages/MasterPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 今回の修正：
 //  ① 一覧の左側を「分類＋旬」→「材料名」→「銘柄」の3段・左揃えに変更
@@ -2700,11 +2700,12 @@ function NutrientRow({
     </div>
   );
 }
-
+echo ..
 ..
 ===== src\pages\MenuPage.tsx =====
-echo ...
+
 // src/pages/MenuPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：①家族が候補・確定を変えたとき、すぐ画面に反映（Supabase Realtime）／②空欄メッセージのスワイプ方向を修正（レシピ一覧は左スワイプ）
 // 前提：09_menu_status_migration.sql（plan_confirmed 列）と 11_cook_logs_migration.sql（cook_logs テーブル）を実行済み
 // 献立画面：日割りなし。「確定」と「候補」の2つのリストを、小さな行（料理名＋引用元）で並べる（ボタンなし・スワイプで操作）
 //   【候補】 → 右スワイプ：確定に追加 ／ ← 左スワイプ：削除（献立から外す。レシピは残る）
@@ -2713,7 +2714,7 @@ echo ...
 //   ・1食あたりの平均価格・平均カロリー（食事回数＝確定した「主菜」と「麺・丼・ワンプレート」の数）
 //   ・「🛒 買い物リストに追加」ボタン
 // 人数切替は「確定」見出しの右端（共通設定。一覧・詳細と同じ人数で表示）
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useOutletContext } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../supabaseClient'
@@ -2800,58 +2801,93 @@ export default function MenuPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false) // 自分の操作中は、Realtimeでの読み込み直しを止める
   const [toast, setToast] = useState<Toast | null>(null)
   const [servings, setServings] = useServings()
   const [showAdd, setShowAdd] = useState(false) // 「買い物リストに追加」の確認画面
 
-  useEffect(() => {
-    ;(async () => {
-      const { data, error: recErr } = await supabase
-        .from('recipes')
-        .select(
-          'id, dish_name, servings, category, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at',
-        )
-        .eq('is_planned', true)
-
-      if (recErr) {
-        setError(recErr.message)
-        setLoading(false)
-        return
-      }
-
-      const recipes = (data ?? []) as Recipe[]
-      const ids = recipes.map((r) => r.id)
-
-      // カロリー・費用（材料マスタから計算した1人前あたり）。読めなくても献立自体は表示する
-      const nutrition = new Map<string, { kcal: number | null; price: number | null; unresolved: number }>()
-      if (ids.length > 0) {
-        const { data: nutData, error: nutErr } = await supabase
-          .from('recipe_nutrition')
-          .select('recipe_id, calorie_per_serving, price_per_serving, unresolved_count')
-          .in('recipe_id', ids)
-        if (nutErr) {
-          console.error(nutErr)
-        } else {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ;(nutData ?? []).forEach((n: any) => {
-            nutrition.set(String(n.recipe_id), {
-              kcal: typeof n.calorie_per_serving === 'number' ? n.calorie_per_serving : null,
-              price: typeof n.price_per_serving === 'number' ? n.price_per_serving : null,
-              unresolved: typeof n.unresolved_count === 'number' ? n.unresolved_count : 0,
-            })
-          })
-        }
-      }
-
-      setRows(
-        recipes.map((r) => {
-          const n = nutrition.get(r.id)
-          return { ...r, kcal: n?.kcal ?? null, price: n?.price ?? null, unresolved: n?.unresolved ?? 0 }
-        }),
+  const load = useCallback(async () => {
+    const { data, error: recErr } = await supabase
+      .from('recipes')
+      .select(
+        'id, dish_name, servings, category, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at',
       )
+      .eq('is_planned', true)
+
+    if (recErr) {
+      setError(recErr.message)
       setLoading(false)
-    })()
+      return
+    }
+
+    const recipes = (data ?? []) as Recipe[]
+    const ids = recipes.map((r) => r.id)
+
+    // カロリー・費用（材料マスタから計算した1人前あたり）。読めなくても献立自体は表示する
+    const nutrition = new Map<string, { kcal: number | null; price: number | null; unresolved: number }>()
+    if (ids.length > 0) {
+      const { data: nutData, error: nutErr } = await supabase
+        .from('recipe_nutrition')
+        .select('recipe_id, calorie_per_serving, price_per_serving, unresolved_count')
+        .in('recipe_id', ids)
+      if (nutErr) {
+        console.error(nutErr)
+      } else {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(nutData ?? []).forEach((n: any) => {
+          nutrition.set(String(n.recipe_id), {
+            kcal: typeof n.calorie_per_serving === 'number' ? n.calorie_per_serving : null,
+            price: typeof n.price_per_serving === 'number' ? n.price_per_serving : null,
+            unresolved: typeof n.unresolved_count === 'number' ? n.unresolved_count : 0,
+          })
+        })
+      }
+    }
+
+    setRows(
+      recipes.map((r) => {
+        const n = nutrition.get(r.id)
+        return { ...r, kcal: n?.kcal ?? null, price: n?.price ?? null, unresolved: n?.unresolved ?? 0 }
+      }),
+    )
+    setError(null)
+    setLoading(false)
   }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  // 家族が候補・確定を変えたとき、すぐ反映する（Supabase Realtime）
+  //   ・自分の操作中（busy）は読み込み直しを後ろに回す。短時間に何度も来ても1回にまとめる（0.3秒）
+  useEffect(() => {
+    let timer: number | undefined
+    const reload = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        if (busyRef.current) reload()
+        else void load()
+      }, 300)
+    }
+    // StrictModeで2回動いても名前がぶつからないよう、毎回ちがう名前にする
+    const channel = supabase
+      .channel(`menu-recipes-${Math.random().toString(36).slice(2)}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'recipes' }, reload)
+      .subscribe()
+    return () => {
+      window.clearTimeout(timer)
+      void supabase.removeChannel(channel)
+    }
+  }, [load])
+
+  // 別のアプリから戻ったときにも、最新を読み込み直す（Realtimeが切れていた場合の保険）
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && !busyRef.current) void load()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [load])
 
   // 「元に戻す」メッセージは5秒で自動的に消す
   useEffect(() => {
@@ -2878,8 +2914,10 @@ export default function MenuPage() {
   const act = async (row: MenuRow, patch: Patch, message: string) => {
     if (busy) return
     setBusy(true)
+    busyRef.current = true
     const before = snapshot(row)
     const ok = await applyPatch(row.id, patch)
+    busyRef.current = false
     setBusy(false)
     if (!ok) return
     setToast({
@@ -2910,6 +2948,7 @@ export default function MenuPage() {
   const markCooked = async (r: MenuRow) => {
     if (busy) return
     setBusy(true)
+    busyRef.current = true
     const before = snapshot(r)
 
     // ① 作った日付を保存（先に保存。あとの更新に失敗したら、この履歴を消す）
@@ -2924,6 +2963,7 @@ export default function MenuPage() {
       if (logErr) throw logErr
       logId = (data as { id: string }).id
     } catch (e) {
+      busyRef.current = false
       setBusy(false)
       alert(
         '作った日付の記録に失敗しました：' +
@@ -2941,6 +2981,7 @@ export default function MenuPage() {
       planned_at: null,
       cook_count: r.cook_count + 1,
     })
+    busyRef.current = false
     setBusy(false)
     if (!ok) {
       await supabase.from('cook_logs').delete().eq('id', logId)
@@ -3063,7 +3104,7 @@ export default function MenuPage() {
           <div className="mt-4" />
           <SectionTitle icon="💭" title="候補" count={candidates.length} hint="→確定 ←削除" />
           {candidates.length === 0 ? (
-            <Empty text="候補はありません（レシピ一覧で右スワイプ／＋で追加）" />
+            <Empty text="候補はありません（レシピ一覧で左スワイプ／＋で追加）" />
           ) : (
             <div className="space-y-1">
               {candidates.map((r) => (
@@ -3180,10 +3221,10 @@ function MenuLine({ row: r, servings }: { row: MenuRow; servings: number }) {
     </Link>
   )
 }
-
+echo ..
 ..
 ===== src\pages\RecipeDetailPage.tsx =====
-echo ...
+
 // src/pages/RecipeDetailPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：recipe_nutrition ビュー（01）、recipes.plan_confirmed 列（09）、cook_logs テーブル（11）を作成済みであること
 // 前提：12_ingredients_by_step.sql（steps.tip / ingredients.step_id / ingredients.group_label）を実行済みであること
@@ -3932,10 +3973,10 @@ function StepCard({
     </li>
   )
 }
-
+echo ..
 ..
 ===== src\pages\RecipeListPage.tsx =====
-echo ...
+
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：recipe_nutrition ビュー（01）と、recipes.plan_confirmed 列（09）を作成済みであること
 // 機能：
@@ -4680,10 +4721,10 @@ function Chip({
     </button>
   )
 }
-
+echo ..
 ..
 ===== src\pages\SettingsPage.tsx =====
-echo ...
+
 // src/pages/SettingsPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // ※ もしここに「パスキー（FaceID）登録ボタン」などを自分で追加済みなら、全文を置き換えずに
 //    <ShoppingCategoryOrderSettings /> の1行と、その import だけを足してください。
@@ -4708,11 +4749,12 @@ export default function SettingsPage() {
     </div>
   )
 }
-
+echo ..
 ..
 ===== src\pages\ShoppingPage.tsx =====
-echo ...
+
 // src/pages/ShoppingPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：家族が追加・チェック・削除・並べ替えをしたとき、すぐ画面に反映（Supabase Realtime）
 // 前提：10_shopping_migration.sql を実行済み
 // 買い物リスト：
 //   ・一番上の帯（タイトル・自動配置）はスクロールしても固定
@@ -4818,6 +4860,30 @@ export default function ShoppingPage() {
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [load])
+
+  // 家族の操作（追加・カゴに入れた・削除・並べ替え）を、すぐ反映する（Supabase Realtime）
+  //   ・短時間に何度も来ても1回にまとめる（0.3秒）
+  //   ・ドラッグ中は画面を入れ替えないよう、少し待ってから読み込み直す
+  //   ・DELETEはテーブル全体を購読する（RLSがあるので、見えるのは自分の世帯の分だけ）
+  useEffect(() => {
+    let timer: number | undefined
+    const reload = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        if (dragActiveRef.current) reload()
+        else void load()
+      }, 300)
+    }
+    // StrictModeで2回動いても名前がぶつからないよう、毎回ちがう名前にする
+    const channel = supabase
+      .channel(`shopping-items-${Math.random().toString(36).slice(2)}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shopping_items' }, reload)
+      .subscribe()
+    return () => {
+      window.clearTimeout(timer)
+      void supabase.removeChannel(channel)
+    }
   }, [load])
 
   // 「元に戻す」メッセージは5秒で自動的に消す
@@ -5295,10 +5361,10 @@ function ItemRow({ item, onToggle }: { item: ShoppingItem; onToggle: () => void 
     </div>
   )
 }
-
+echo ..
 ..
 ===== src\types\cookLog.ts =====
-echo ...
+
 // src/types/cookLog.ts（新規作成）
 // 「作った」履歴の型定義（テーブル: cook_logs）
 export type CookLog = {
@@ -5309,10 +5375,10 @@ export type CookLog = {
   cooked_by: string | null
   created_at: string
 }
-
+echo ..
 ..
 ===== src\types\ingredient.ts =====
-echo ...
+
 export type IngredientCategory =
   | '野菜'
   | '肉'
@@ -5365,10 +5431,10 @@ export interface IngredientMaster {
   created_at: string;
   updated_at: string;
   
-}
+}echo ..
 ..
 ===== src\types\recipe.ts =====
-echo ...
+
 // src/types/recipe.ts（ファイル全体。これで丸ごと置き換えてください）
 // 変更点：Ingredient型に step_id・group_label、Step型に tip を追加（12_ingredients_by_step.sql に対応）
 // （以前の変更点：Recipe型に plan_confirmed を追加）
@@ -5430,10 +5496,10 @@ export type RecipeWithDetail = Recipe & {
   ingredients: Ingredient[]
   steps: Step[]
 }
-
+echo ..
 ..
 ===== src\types\shopping.ts =====
-echo ...
+
 // src/types/shopping.ts（新規作成）
 // 買い物リストの型定義（テーブル: shopping_items）
 export type ShoppingItem = {
@@ -5454,5 +5520,5 @@ export type ShoppingItem = {
   note: string | null // どのレシピ用か（例：肉じゃが・カレーライス）
   created_at: string
 }
-
+echo ..
 ..

@@ -1,10 +1,22 @@
-// src/lib/shoppingAggregate.ts（新規作成）
+
+// src/lib/shoppingAggregate.ts（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：材料の「複数単位」対応（ingredient_units）
+//   ・材料マスタに登録された単位（大さじ・小さじ・個・枚・g…）なら、どの単位どうしでも換算して合算できる
+//   ・合算した結果は、その材料の「基準単位」（ingredient_units.is_default）で表示する
+//   ・単位が全部同じときは、これまでどおりそのまま合算（単位は変えない）
 // 確定した献立の材料を、買い物用に合計する（画面に依存しない計算だけの部品）
 //   ・同じ材料は合算（例：玉ねぎ 200g ＋ 100g → 300g）
 //   ・人数に合わせて分量を増減（レシピの元の人数 → 選んだ人数）
-//   ・単位が違うときは、材料マスタの「既定の単位」と「1単位の重さ」で換算して合算できる場合だけ合算
+//   ・単位が違うときは、材料マスタの単位表（ingredient_units）で換算して合算できる場合だけ合算
 //     （換算できなければ、単位ごとに別の行にする）
 //   ・「適量」「少々」などは、数量がある行があれば無視。なければ「適量」の1行にする
+
+// 材料マスタに登録された単位（テーブル: ingredient_units）。weight_g は「1単位が何gか」
+export type MasterUnit = {
+  unit: string
+  weight_g: number
+  is_default: boolean
+}
 
 export type RawIngredient = {
   recipe_id: string
@@ -15,8 +27,9 @@ export type RawIngredient = {
   master: {
     ingredient_name: string
     category: string
-    default_unit: string | null
-    unit_weight_g: number | null
+    default_unit: string | null // 移行期間のフォールバック（units が空のときだけ使う）
+    unit_weight_g: number | null // 同上
+    units: MasterUnit[] // 単位表。無ければ空の配列
   } | null
 }
 
@@ -58,6 +71,31 @@ export function normUnit(unit: string | null | undefined): string | null {
   if (u === '') return null
   if (u === 'ｇ' || u === 'グラム') return 'g'
   return u
+}
+
+// 単位 → 「1単位が何gか」の表を作る（g はいつでも 1）
+//   units が空でも、旧列（default_unit / unit_weight_g）があればそれを使う（移行期間の保険）
+export function buildUnitWeights(
+  units: MasterUnit[] | null | undefined,
+  defaultUnit?: string | null,
+  unitWeightG?: number | null,
+): Map<string, number> {
+  const weights = new Map<string, number>()
+  weights.set('g', 1)
+  for (const u of units ?? []) {
+    const name = normUnit(u.unit)
+    const w = Number(u.weight_g)
+    if (name != null && name !== 'g' && w > 0) weights.set(name, w)
+  }
+  const du = normUnit(defaultUnit)
+  if (du != null && !weights.has(du) && unitWeightG != null && unitWeightG > 0) weights.set(du, unitWeightG)
+  return weights
+}
+
+// 基準単位（買い物リストなどに表示する単位）
+export function pickDefaultUnit(units: MasterUnit[] | null | undefined, defaultUnit?: string | null): string | null {
+  const d = (units ?? []).find((u) => u.is_default)
+  return normUnit(d?.unit ?? defaultUnit)
 }
 
 // 見やすい桁数に丸めて、文字列にする（0.75 / 12.5 / 300）
@@ -121,18 +159,14 @@ function buildItems(g: Group): AggItem[] {
       // 単位が全部同じ → そのまま合算
       push(roundQty(numeric.reduce((s, l) => s + (l.qty as number), 0)), units[0])
     } else {
-      // 単位がばらばら → マスタの既定の単位に換算できるなら合算
-      const du = normUnit(g.master?.default_unit)
-      const w = g.master?.unit_weight_g ?? null
-      const convertible =
-        du != null && numeric.every((l) => l.unit === 'g' || (l.unit === du && w != null && w > 0))
-      if (convertible && du != null) {
-        const grams = numeric.reduce(
-          (s, l) => s + (l.unit === 'g' ? (l.qty as number) : (l.qty as number) * (w as number)),
-          0,
-        )
-        const q = du === 'g' ? grams : grams / (w as number)
-        push(roundQty(q), du)
+      // 単位がばらばら → マスタの単位表で換算できるなら、基準単位に直して合算
+      const weights = buildUnitWeights(g.master?.units, g.master?.default_unit, g.master?.unit_weight_g)
+      const du = pickDefaultUnit(g.master?.units, g.master?.default_unit)
+      const dw = du != null ? weights.get(du) : undefined
+      const convertible = dw != null && numeric.every((l) => l.unit != null && weights.has(l.unit))
+      if (convertible && du != null && dw != null) {
+        const grams = numeric.reduce((sum, l) => sum + (l.qty as number) * (weights.get(l.unit as string) as number), 0)
+        push(roundQty(grams / dw), du)
       } else {
         // 換算できない → 単位ごとに別の行
         for (const u of units) {

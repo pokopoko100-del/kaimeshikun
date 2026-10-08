@@ -1,4 +1,6 @@
+
 // src/pages/RecipeDetailPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：「未計算」の判定を、材料マスタの単位表（ingredient_units）に合わせた（recipe_nutrition ビューの第2段階と同じルール）
 // 前提：recipe_nutrition ビュー（01）、recipes.plan_confirmed 列（09）、cook_logs テーブル（11）を作成済みであること
 // 前提：12_ingredients_by_step.sql（steps.tip / ingredients.step_id / ingredients.group_label）を実行済みであること
 // 今回の変更：
@@ -28,7 +30,11 @@ import { useServings } from '../lib/useServings'
 
 // 材料 ＋ 紐付いたマスタの単位情報（未計算の判定に使う）
 type IngredientRow = Ingredient & {
-  ingredient_master: { default_unit: string | null; unit_weight_g: number | null } | null
+  ingredient_master: {
+    default_unit: string | null
+    unit_weight_g: number | null
+    ingredient_units?: { unit: string; weight_g: number }[] | null
+  } | null
 }
 
 // 工程の中の材料のまとまり（グループ記号 A・B… がある材料は、同じ記号どうしで1つにまとめる）
@@ -63,6 +69,9 @@ function isResolved(ing: IngredientRow): boolean {
   if (!ing.ingredient_master_id || !m) return false
   if (parseQty(ing.quantity) == null) return false
   if (ing.unit != null && ['g', 'ｇ', 'グラム'].includes(ing.unit)) return true
+  // マスタの単位表に、この材料の単位があって重さが入っていれば計算できる
+  if ((m.ingredient_units ?? []).some((u) => u.unit === ing.unit && Number(u.weight_g) > 0)) return true
+  // 単位表がまだ無い場合の保険（旧列）
   return m.default_unit != null && ing.unit === m.default_unit && m.unit_weight_g != null
 }
 
@@ -184,7 +193,7 @@ export default function RecipeDetailPage() {
         supabase.from('recipes').select('*').eq('id', id).single(),
         supabase
           .from('ingredients')
-          .select('*, ingredient_master(default_unit, unit_weight_g)')
+          .select('*, ingredient_master(default_unit, unit_weight_g, ingredient_units(unit, weight_g))')
           .eq('recipe_id', id)
           .order('sort_order'),
         supabase.from('steps').select('*').eq('recipe_id', id).order('step_number'),

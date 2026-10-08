@@ -1,4 +1,6 @@
-// src/components/ShoppingAddSheet.tsx（新規作成）
+
+// src/components/ShoppingAddSheet.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：材料マスタの単位表（ingredient_units）も読み込み、単位違いの材料を基準単位にそろえて合算する
 // 「買い物リストに追加」の確認画面（全画面）
 //   確定した献立の材料を合計して一覧表示 → 選択／削除／数量変更 → 「確定して買い物リストへ追加」
 //   ・人数は、献立画面の人数設定（○人前）で分量を計算
@@ -6,7 +8,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../supabaseClient'
 import { aggregateIngredients, itemKeyOf } from '../lib/shoppingAggregate'
-import type { AggItem, RawIngredient, RecipeInfo } from '../lib/shoppingAggregate'
+import type { AggItem, MasterUnit, RawIngredient, RecipeInfo } from '../lib/shoppingAggregate'
 import { addItemsToShoppingList } from '../lib/shoppingList'
 import { fetchCategoryOrder, findShoppingListId, getHouseholdId } from '../lib/household'
 import { CATEGORY_BADGE, normalizeCategoryOrder } from '../lib/categoryOrder'
@@ -45,7 +47,7 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
           supabase
             .from('ingredients')
             .select(
-              'recipe_id, ingredient_master_id, ingredient_name, quantity, unit, ingredient_master(ingredient_name, category, default_unit, unit_weight_g)',
+              'recipe_id, ingredient_master_id, ingredient_name, quantity, unit, ingredient_master(ingredient_name, category, default_unit, unit_weight_g, ingredient_units(unit, weight_g, is_default))',
             )
             .in('recipe_id', ids)
             .order('sort_order'),
@@ -69,11 +71,18 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
           })
         }
 
-        // 結合したマスタ情報は、配列で返る場合もあるのでそろえる
+        // 結合したマスタ情報は、配列で返る場合もあるのでそろえる（単位表は ingredient_units で返る）
+        type JoinedMaster = {
+          ingredient_name: string
+          category: string
+          default_unit: string | null
+          unit_weight_g: number | null
+          ingredient_units: MasterUnit[] | null
+        }
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const raws: RawIngredient[] = (ingRes.data ?? []).map((row: any) => {
           const m = (Array.isArray(row.ingredient_master) ? row.ingredient_master[0] : row.ingredient_master) as
-            | RawIngredient['master']
+            | JoinedMaster
             | null
             | undefined
           return {
@@ -82,7 +91,15 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
             ingredient_name: row.ingredient_name as string,
             quantity: row.quantity as string | null,
             unit: row.unit as string | null,
-            master: m ?? null,
+            master: m
+              ? {
+                  ingredient_name: m.ingredient_name,
+                  category: m.category,
+                  default_unit: m.default_unit,
+                  unit_weight_g: m.unit_weight_g,
+                  units: m.ingredient_units ?? [],
+                }
+              : null,
           }
         })
 
