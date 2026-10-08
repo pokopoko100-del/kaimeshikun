@@ -424,10 +424,10 @@ export default function LoginPage() {
       </div>
     </div>
   )
-}..
-
-===== src\components\ServingsStepper.tsx =====
+}
 ..
+===== src\components\ServingsStepper.tsx =====
+echo ...
 // src/components/ServingsStepper.tsx（新規作成）
 // 「－ 2人前 ＋」の人数切替ボタン
 import { MAX_SERVINGS, MIN_SERVINGS } from '../lib/useServings'
@@ -463,10 +463,10 @@ export default function ServingsStepper({
     </div>
   )
 }
-..
 
-===== src\components\ShoppingAddSheet.tsx =====
 ..
+===== src\components\ShoppingAddSheet.tsx =====
+echo ...
 // src/components/ShoppingAddSheet.tsx（新規作成）
 // 「買い物リストに追加」の確認画面（全画面）
 //   確定した献立の材料を合計して一覧表示 → 選択／削除／数量変更 → 「確定して買い物リストへ追加」
@@ -773,10 +773,10 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
     </div>
   )
 }
-..
 
-===== src\components\ShoppingCategoryOrderSettings.tsx =====
 ..
+===== src\components\ShoppingCategoryOrderSettings.tsx =====
+echo ...
 // src/components/ShoppingCategoryOrderSettings.tsx（新規作成）
 // 設定画面の「買い物リストのカテゴリ順」（▲▼で入れ替え。変更するとすぐ保存される）
 import { useEffect, useState } from 'react'
@@ -892,10 +892,10 @@ export default function ShoppingCategoryOrderSettings() {
     </section>
   )
 }
-..
 
-===== src\components\SwipeRow.tsx =====
 ..
+===== src\components\SwipeRow.tsx =====
+echo ...
 // src/components/SwipeRow.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 左右にスワイプできる行。離したときに一定以上動いていたら、その向きの操作を実行する。
 //   左スワイプ（指を右→左）… onSwipeLeft  を実行（右側にラベルが現れる）
@@ -1050,10 +1050,10 @@ export default function SwipeRow({
     </div>
   )
 }
-..
 
-===== src\data\nutrientInfo.ts =====
 ..
+===== src\data\nutrientInfo.ts =====
+echo ...
 
 import type { IngredientMaster } from '../types/ingredient';
 
@@ -1268,10 +1268,10 @@ export function getNutrientInfo(key: keyof IngredientMaster) {
   return NUTRIENT_INFO_LIST.find((n) => n.key === key) ?? null;
 }
 
-..
 
-===== src\lib\categoryOrder.ts =====
 ..
+===== src\lib\categoryOrder.ts =====
+echo ...
 // src/lib/categoryOrder.ts（新規作成）
 // 買い物リストのカテゴリ順（設定画面で変更できる）に関する共通部品
 
@@ -1322,10 +1322,10 @@ export const CATEGORY_BADGE: Record<string, string> = {
   その他: 'bg-gray-100 text-gray-700',
   日用品: 'bg-purple-100 text-purple-700',
 }
-..
 
-===== src\lib\dates.ts =====
 ..
+===== src\lib\dates.ts =====
+echo ...
 // src/lib/dates.ts（新規作成）
 // 日付まわりの共通部品（「作った日」の保存と表示に使う）
 
@@ -1346,10 +1346,10 @@ export function formatCookedDate(ymd: string): string {
   const w = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()]
   return `${m[1]}/${m[2]}/${m[3]}（${w}）`
 }
-..
 
-===== src\lib\dragReorder.ts =====
 ..
+===== src\lib\dragReorder.ts =====
+echo ...
 // src/lib/dragReorder.ts（新規作成）
 // 買い物リストの「長押しドラッグで並べ替え」の計算だけを切り出した部品（画面に依存しない）
 
@@ -1399,10 +1399,10 @@ export function planSortOrder(list: { id: string; sort_order: number }[], id: st
   ordered.splice(toIndex, 0, moved)
   return { kind: 'renumber', orders: ordered.map((it, i) => ({ id: it.id, sort_order: (i + 1) * 1000 })) }
 }
-..
 
-===== src\lib\errorText.ts =====
 ..
+===== src\lib\errorText.ts =====
+echo ...
 // src/lib/errorText.ts（新規作成）
 // どんな形のエラーでも、画面に出せる文字列にする
 export function errorText(e: unknown): string {
@@ -1412,10 +1412,10 @@ export function errorText(e: unknown): string {
   }
   return '不明なエラー'
 }
-..
 
-===== src\lib\household.ts =====
 ..
+===== src\lib\household.ts =====
+echo ...
 // src/lib/household.ts（新規作成）
 // 世帯（家族グループ）まわりのDB操作：世帯ID・買い物リストのID・カテゴリ順の読み書き
 import { supabase } from '../supabaseClient'
@@ -1486,10 +1486,10 @@ export async function getOrCreateShoppingListId(householdId: string, userId: str
   if (error) throw error
   return data.id as string
 }
-..
 
-===== src\lib\shoppingAggregate.ts =====
 ..
+===== src\lib\shoppingAggregate.ts =====
+echo ...
 // src/lib/shoppingAggregate.ts（新規作成）
 // 確定した献立の材料を、買い物用に合計する（画面に依存しない計算だけの部品）
 //   ・同じ材料は合算（例：玉ねぎ 200g ＋ 100g → 300g）
@@ -1692,10 +1692,10 @@ export function aggregateIngredients(
   for (const g of groups.values()) out.push(...buildItems(g))
   return out
 }
-..
 
-===== src\lib\shoppingList.ts =====
 ..
+===== src\lib\shoppingList.ts =====
+echo ...
 // src/lib/shoppingList.ts（新規作成）
 // 買い物リストへ材料を追加する処理
 //   ・すでにリストにある（未購入の）同じ材料・同じ単位は、数量を足して1行にまとめる
@@ -1798,10 +1798,10 @@ export async function addItemsToShoppingList(params: {
 
   return { inserted: toInsert.length, merged: updates.size }
 }
-..
 
-===== src\lib\shoppingOrder.ts =====
 ..
+===== src\lib\shoppingOrder.ts =====
+echo ...
 // src/lib/shoppingOrder.ts（新規作成）
 // 買い物リストに新しい材料を足すときの「自動配置」の計算（画面に依存しない部品）
 //   ・新しい材料は、カテゴリ順（設定画面の順）に合う位置に差し込む
@@ -1848,10 +1848,10 @@ export function computeSortOrders(
   }
   return result
 }
-..
 
-===== src\lib\supabaseStorage.ts =====
 ..
+===== src\lib\supabaseStorage.ts =====
+echo ...
 // ファイル: src/lib/supabaseStorage.ts
 // recipe-images バケット(非公開)から、期限付きの閲覧URLを取得する
 
@@ -1874,10 +1874,10 @@ export async function getRecipeImageUrl(imagePath: string | null): Promise<strin
   }
 
   return data.signedUrl
-}..
-
-===== src\lib\useRecipeImage.ts =====
+}
 ..
+===== src\lib\useRecipeImage.ts =====
+echo ...
 // ファイル: src/lib/useRecipeImage.ts
 // レシピ写真のURLを取得するReactフック(署名付きURLをstateで保持)
 
@@ -1905,10 +1905,10 @@ export function useRecipeImage(imagePath: string | null) {
   }, [imagePath])
 
   return url
-}..
-
-===== src\lib\useServings.ts =====
+}
 ..
+===== src\lib\useServings.ts =====
+echo ...
 // src/lib/useServings.ts（新規作成）
 // 「何人前で表示するか」を、レシピ一覧・レシピ詳細・献立で共通に使うためのフック。
 // 選んだ人数は端末に保存され、次回も同じ人数で開きます（最初は1人前）。
@@ -1934,10 +1934,10 @@ export function useServings(): [number, (n: number) => void] {
 
   return [servings, change]
 }
-..
 
-===== src\pages\MasterPage.tsx =====
 ..
+===== src\pages\MasterPage.tsx =====
+echo ...
 // src/pages/MasterPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 今回の修正：
 //  ① 一覧の左側を「分類＋旬」→「材料名」→「銘柄」の3段・左揃えに変更
@@ -2700,10 +2700,10 @@ function NutrientRow({
     </div>
   );
 }
-..
 
-===== src\pages\MenuPage.tsx =====
 ..
+===== src\pages\MenuPage.tsx =====
+echo ...
 // src/pages/MenuPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：09_menu_status_migration.sql（plan_confirmed 列）と 11_cook_logs_migration.sql（cook_logs テーブル）を実行済み
 // 献立画面：日割りなし。「確定」と「候補」の2つのリストを、小さな行（料理名＋引用元）で並べる（ボタンなし・スワイプで操作）
@@ -3180,15 +3180,20 @@ function MenuLine({ row: r, servings }: { row: MenuRow; servings: number }) {
     </Link>
   )
 }
-..
 
-===== src\pages\RecipeDetailPage.tsx =====
 ..
+===== src\pages\RecipeDetailPage.tsx =====
+echo ...
 // src/pages/RecipeDetailPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：recipe_nutrition ビュー（01）、recipes.plan_confirmed 列（09）、cook_logs テーブル（11）を作成済みであること
+// 前提：12_ingredients_by_step.sql（steps.tip / ingredients.step_id / ingredients.group_label）を実行済みであること
 // 今回の変更：
-//  ・「🍳 作った履歴」を追加。献立で「作った」にした日付が、新しい順に並ぶ（11 を実行した後の分から）
+//  ・材料を「工程ごと」に表示（使う順）。「① 工程名 → 材料 → → 本文 → POINT」の並び
+//  ・材料のグループ記号（A・B…）をオレンジの丸バッジで表示。工程の本文中の [A] もバッジにする
+//  ・工程に紐付いていない材料（古いレシピなど）は、これまで通り「材料」「作り方」を別々に表示
+//    （一部だけ紐付いている場合は、紐付いていない材料を「その他の材料」として先頭に表示）
 // これまでの内容：
+//  ・「🍳 作った履歴」：献立で「作った」にした日付が、新しい順に並ぶ
 //  ・人数を変えられる（「－ 2人前 ＋」。レシピ一覧・献立と共通の設定）。カロリー・費用・栄養素・材料の分量が連動
 //  ・献立候補トグル（未追加／候補／確定）。追加は「候補」から。確定・作ったは献立画面で行う
 //  ・カロリー／費用／栄養素は recipe_nutrition ビュー（材料マスタから計算）から表示
@@ -3211,6 +3216,9 @@ import { useServings } from '../lib/useServings'
 type IngredientRow = Ingredient & {
   ingredient_master: { default_unit: string | null; unit_weight_g: number | null } | null
 }
+
+// 工程の中の材料のまとまり（グループ記号 A・B… がある材料は、同じ記号どうしで1つにまとめる）
+type IngBlock = { label: string | null; items: IngredientRow[] }
 
 // recipe_nutrition ビューの1行
 type NutritionRow = Record<string, number | string | null>
@@ -3292,6 +3300,30 @@ function nvPer(row: NutritionRow | null, col: string, servings: number): number 
 // 材料マスタの列名 → ビューの列名（xxx_per_100g → xxx_per_serving）
 function servingCol(key: string): string {
   return key.replace('_per_100g', '_per_serving')
+}
+
+// 工程の材料を、表示用のまとまりに分ける（並びは sort_order のまま。同じ記号 A は1か所に集める）
+function buildBlocks(list: IngredientRow[]): IngBlock[] {
+  const blocks: IngBlock[] = []
+  for (const ing of list) {
+    const label = ing.group_label
+    if (label) {
+      const found = blocks.find((b) => b.label === label)
+      if (found) {
+        found.items.push(ing)
+      } else {
+        blocks.push({ label, items: [ing] })
+      }
+    } else {
+      const last = blocks[blocks.length - 1]
+      if (last && last.label === null) {
+        last.items.push(ing)
+      } else {
+        blocks.push({ label: null, items: [ing] })
+      }
+    }
+  }
+  return blocks
 }
 
 // 栄養素の表示グループ（カロリーは上のカードに出すので除外）
@@ -3444,6 +3476,22 @@ export default function RecipeDetailPage() {
     )
     return { main, micro }
   }, [])
+
+  // 材料を工程ごとに分ける。1つも工程に紐付いていないレシピは、これまで通りの表示にする
+  const stepLayout = useMemo(() => {
+    const stepIds = new Set(steps.map((s) => s.id))
+    const byStep = new Map<string, IngredientRow[]>()
+    const others: IngredientRow[] = []
+    const linked = ingredients.some((i) => i.step_id != null && stepIds.has(i.step_id))
+    for (const ing of ingredients) {
+      if (linked && ing.step_id != null && stepIds.has(ing.step_id)) {
+        byStep.set(ing.step_id, [...(byStep.get(ing.step_id) ?? []), ing])
+      } else {
+        others.push(ing)
+      }
+    }
+    return { linked, byStep, others }
+  }, [ingredients, steps])
 
   if (loading) {
     return (
@@ -3620,59 +3668,73 @@ export default function RecipeDetailPage() {
           )}
         </section>
 
-        {/* 材料 */}
-        <section className="mt-6">
-          <h2 className="font-semibold text-gray-800 mb-2">
-            材料({servings}人前)
-            {servings !== recipe.servings && (
-              <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
+        {stepLayout.linked ? (
+          /* 材料と作り方：工程ごと（使う順） */
+          <section className="mt-6">
+            <h2 className="font-semibold text-gray-800 mb-2">
+              材料と作り方({servings}人前)
+              {servings !== recipe.servings && (
+                <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
+              )}
+            </h2>
+            {stepLayout.others.length > 0 && (
+              <div className="mb-3 rounded-xl bg-white p-3 shadow-sm">
+                <p className="mb-1 text-xs font-semibold text-gray-500">その他の材料</p>
+                <StepIngredients list={stepLayout.others} factor={factor} unresolvedSet={unresolvedSet} />
+              </div>
             )}
-          </h2>
-          {ingredients.length === 0 ? (
-            <p className="text-sm text-gray-400">材料情報はありません。</p>
-          ) : (
-            <ul className="bg-white rounded-xl shadow-sm divide-y divide-gray-100">
-              {ingredients.map((ing) => (
-                <li key={ing.id} className="flex justify-between px-4 py-2 text-sm">
-                  <span className="text-gray-700">
-                    {ing.ingredient_name}
-                    {ing.preparation && <span className="text-gray-400">({ing.preparation})</span>}
-                    {unresolvedSet.has(ing.id) && (
-                      <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
-                        未計算
-                      </span>
-                    )}
-                  </span>
-                  <span className="text-gray-500">{formatAmount(scaleQuantity(ing.quantity, factor), ing.unit)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        {/* 作り方 */}
-        <section className="mt-6">
-          <h2 className="font-semibold text-gray-800 mb-2">作り方</h2>
-          {steps.length === 0 ? (
-            <p className="text-sm text-gray-400">工程情報はありません。</p>
-          ) : (
             <ol className="space-y-3">
               {steps.map((step) => (
-                <li key={step.id} className="bg-white rounded-xl shadow-sm p-3">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="w-6 h-6 flex items-center justify-center rounded-full bg-amber-500 text-white text-xs font-semibold">
-                      {step.step_number}
-                    </span>
-                    {step.step_name && (
-                      <span className="font-medium text-gray-800 text-sm">{step.step_name}</span>
-                    )}
-                  </div>
-                  {step.description && <p className="text-sm text-gray-600 pl-8">{step.description}</p>}
-                </li>
+                <StepCard
+                  key={step.id}
+                  step={step}
+                  ingredients={stepLayout.byStep.get(step.id) ?? []}
+                  factor={factor}
+                  unresolvedSet={unresolvedSet}
+                />
               ))}
             </ol>
-          )}
-        </section>
+          </section>
+        ) : (
+          <>
+            {/* 材料 */}
+            <section className="mt-6">
+              <h2 className="font-semibold text-gray-800 mb-2">
+                材料({servings}人前)
+                {servings !== recipe.servings && (
+                  <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
+                )}
+              </h2>
+              {ingredients.length === 0 ? (
+                <p className="text-sm text-gray-400">材料情報はありません。</p>
+              ) : (
+                <div className="rounded-xl bg-white px-4 py-1 shadow-sm">
+                  <StepIngredients list={ingredients} factor={factor} unresolvedSet={unresolvedSet} />
+                </div>
+              )}
+            </section>
+
+            {/* 作り方 */}
+            <section className="mt-6">
+              <h2 className="font-semibold text-gray-800 mb-2">作り方</h2>
+              {steps.length === 0 ? (
+                <p className="text-sm text-gray-400">工程情報はありません。</p>
+              ) : (
+                <ol className="space-y-3">
+                  {steps.map((step) => (
+                    <StepCard
+                      key={step.id}
+                      step={step}
+                      ingredients={[]}
+                      factor={factor}
+                      unresolvedSet={unresolvedSet}
+                    />
+                  ))}
+                </ol>
+              )}
+            </section>
+          </>
+        )}
 
         {/* 作った履歴（献立で「作った」にした日付） */}
         <section className="mt-6">
@@ -3739,10 +3801,141 @@ function NutrientLine({ label, value, indent }: { label: string; value: string; 
     </div>
   )
 }
-..
 
-===== src\pages\RecipeListPage.tsx =====
+// ---------- 工程ごとの表示部品 ----------
+
+// グループ記号（A・B…）のオレンジの丸バッジ
+function GroupBadge({ label, small }: { label: string; small?: boolean }) {
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center justify-center rounded-full bg-orange-500 font-bold text-white ${
+        small ? 'mx-0.5 h-4 w-4 align-middle text-[10px]' : 'h-5 w-5 text-[11px]'
+      }`}
+    >
+      {label}
+    </span>
+  )
+}
+
+// 工程の本文：[A] の部分だけバッジにする（例：「[A]を入れる」→「Ⓐを入れる」）
+function StepText({ text }: { text: string }) {
+  const parts = text.split(/\[([A-Z])\]/) // 奇数番目が、かっこの中の記号
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? <GroupBadge key={i} label={part} small /> : <span key={i}>{part}</span>,
+      )}
+    </>
+  )
+}
+
+// 材料1行（名前＋下処理＋未計算マーク／右に分量）
+function IngredientLine({
+  ing,
+  factor,
+  unresolved,
+}: {
+  ing: IngredientRow
+  factor: number
+  unresolved: boolean
+}) {
+  return (
+    <li className="flex justify-between gap-2 py-1 text-sm">
+      <span className="min-w-0 text-gray-700">
+        {ing.ingredient_name}
+        {ing.preparation && <span className="text-gray-400">({ing.preparation})</span>}
+        {unresolved && (
+          <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+            未計算
+          </span>
+        )}
+      </span>
+      <span className="shrink-0 text-gray-500">{formatAmount(scaleQuantity(ing.quantity, factor), ing.unit)}</span>
+    </li>
+  )
+}
+
+// 材料のかたまり：記号なしの材料はそのまま並べ、記号（A・B…）がある材料は、バッジ付きの囲みにまとめる
+function StepIngredients({
+  list,
+  factor,
+  unresolvedSet,
+}: {
+  list: IngredientRow[]
+  factor: number
+  unresolvedSet: Set<string>
+}) {
+  const blocks = buildBlocks(list)
+  return (
+    <div>
+      {blocks.map((b, i) =>
+        b.label ? (
+          <div key={i} className="my-1 flex items-start gap-2 rounded-lg bg-orange-50 px-2 py-1">
+            <span className="mt-1">
+              <GroupBadge label={b.label} />
+            </span>
+            <ul className="min-w-0 flex-1 divide-y divide-orange-100">
+              {b.items.map((ing) => (
+                <IngredientLine key={ing.id} ing={ing} factor={factor} unresolved={unresolvedSet.has(ing.id)} />
+              ))}
+            </ul>
+          </div>
+        ) : (
+          <ul key={i} className="divide-y divide-gray-100">
+            {b.items.map((ing) => (
+              <IngredientLine key={ing.id} ing={ing} factor={factor} unresolved={unresolvedSet.has(ing.id)} />
+            ))}
+          </ul>
+        ),
+      )}
+    </div>
+  )
+}
+
+// 工程のカード：① 工程名 → 材料 → → 本文 → POINT
+function StepCard({
+  step,
+  ingredients,
+  factor,
+  unresolvedSet,
+}: {
+  step: Step
+  ingredients: IngredientRow[]
+  factor: number
+  unresolvedSet: Set<string>
+}) {
+  return (
+    <li className="rounded-xl bg-white p-3 shadow-sm">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-500 text-xs font-semibold text-white">
+          {step.step_number}
+        </span>
+        {step.step_name && <span className="text-sm font-medium text-gray-800">{step.step_name}</span>}
+      </div>
+      {ingredients.length > 0 && (
+        <div className="mb-1 pl-8">
+          <StepIngredients list={ingredients} factor={factor} unresolvedSet={unresolvedSet} />
+        </div>
+      )}
+      {step.description && (
+        <p className="pl-8 text-sm leading-relaxed text-gray-600">
+          <span className="mr-1 font-bold text-amber-500">→</span>
+          <StepText text={step.description} />
+        </p>
+      )}
+      {step.tip && (
+        <div className="ml-8 mt-2 rounded-lg bg-yellow-50 px-3 py-2 text-xs leading-relaxed text-yellow-800">
+          <span className="mr-1 font-bold">💡 POINT</span>
+          <StepText text={step.tip} />
+        </div>
+      )}
+    </li>
+  )
+}
+
 ..
+===== src\pages\RecipeListPage.tsx =====
+echo ...
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：recipe_nutrition ビュー（01）と、recipes.plan_confirmed 列（09）を作成済みであること
 // 機能：
@@ -4487,10 +4680,10 @@ function Chip({
     </button>
   )
 }
-..
 
-===== src\pages\SettingsPage.tsx =====
 ..
+===== src\pages\SettingsPage.tsx =====
+echo ...
 // src/pages/SettingsPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // ※ もしここに「パスキー（FaceID）登録ボタン」などを自分で追加済みなら、全文を置き換えずに
 //    <ShoppingCategoryOrderSettings /> の1行と、その import だけを足してください。
@@ -4515,10 +4708,10 @@ export default function SettingsPage() {
     </div>
   )
 }
-..
 
-===== src\pages\ShoppingPage.tsx =====
 ..
+===== src\pages\ShoppingPage.tsx =====
+echo ...
 // src/pages/ShoppingPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：10_shopping_migration.sql を実行済み
 // 買い物リスト：
@@ -5102,10 +5295,10 @@ function ItemRow({ item, onToggle }: { item: ShoppingItem; onToggle: () => void 
     </div>
   )
 }
-..
 
-===== src\types\cookLog.ts =====
 ..
+===== src\types\cookLog.ts =====
+echo ...
 // src/types/cookLog.ts（新規作成）
 // 「作った」履歴の型定義（テーブル: cook_logs）
 export type CookLog = {
@@ -5116,10 +5309,10 @@ export type CookLog = {
   cooked_by: string | null
   created_at: string
 }
-..
 
-===== src\types\ingredient.ts =====
 ..
+===== src\types\ingredient.ts =====
+echo ...
 export type IngredientCategory =
   | '野菜'
   | '肉'
@@ -5172,12 +5365,13 @@ export interface IngredientMaster {
   created_at: string;
   updated_at: string;
   
-}..
-
-===== src\types\recipe.ts =====
+}
 ..
+===== src\types\recipe.ts =====
+echo ...
 // src/types/recipe.ts（ファイル全体。これで丸ごと置き換えてください）
-// 変更点：Recipe型に plan_confirmed（献立に確定済みかどうか）を追加
+// 変更点：Ingredient型に step_id・group_label、Step型に tip を追加（12_ingredients_by_step.sql に対応）
+// （以前の変更点：Recipe型に plan_confirmed を追加）
 // ファイル: src/types/recipe.ts
 // レシピ関連の型定義
 
@@ -5219,6 +5413,8 @@ export type Ingredient = {
   unit: string | null
   note: string | null
   preparation: string | null
+  step_id: string | null // どの工程で使うか（空なら工程に紐付いていない）
+  group_label: string | null // グループ記号（A・B…）。空なら記号なし
 }
 
 export type Step = {
@@ -5227,16 +5423,17 @@ export type Step = {
   step_number: number
   step_name: string | null
   description: string | null
+  tip: string | null // POINT（コツ）
 }
 
 export type RecipeWithDetail = Recipe & {
   ingredients: Ingredient[]
   steps: Step[]
 }
-..
 
-===== src\types\shopping.ts =====
 ..
+===== src\types\shopping.ts =====
+echo ...
 // src/types/shopping.ts（新規作成）
 // 買い物リストの型定義（テーブル: shopping_items）
 export type ShoppingItem = {
@@ -5257,5 +5454,5 @@ export type ShoppingItem = {
   note: string | null // どのレシピ用か（例：肉じゃが・カレーライス）
   created_at: string
 }
-..
 
+..

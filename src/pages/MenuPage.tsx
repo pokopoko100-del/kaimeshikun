@@ -1,4 +1,5 @@
 // src/pages/MenuPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：①家族が候補・確定を変えたとき、すぐ画面に反映（Supabase Realtime）／②空欄メッセージのスワイプ方向を修正（レシピ一覧は左スワイプ）
 // 前提：09_menu_status_migration.sql（plan_confirmed 列）と 11_cook_logs_migration.sql（cook_logs テーブル）を実行済み
 // 献立画面：日割りなし。「確定」と「候補」の2つのリストを、小さな行（料理名＋引用元）で並べる（ボタンなし・スワイプで操作）
 //   【候補】 → 右スワイプ：確定に追加 ／ ← 左スワイプ：削除（献立から外す。レシピは残る）
@@ -7,7 +8,7 @@
 //   ・1食あたりの平均価格・平均カロリー（食事回数＝確定した「主菜」と「麺・丼・ワンプレート」の数）
 //   ・「🛒 買い物リストに追加」ボタン
 // 人数切替は「確定」見出しの右端（共通設定。一覧・詳細と同じ人数で表示）
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useOutletContext } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../supabaseClient'
@@ -94,58 +95,93 @@ export default function MenuPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false) // 自分の操作中は、Realtimeでの読み込み直しを止める
   const [toast, setToast] = useState<Toast | null>(null)
   const [servings, setServings] = useServings()
   const [showAdd, setShowAdd] = useState(false) // 「買い物リストに追加」の確認画面
 
-  useEffect(() => {
-    ;(async () => {
-      const { data, error: recErr } = await supabase
-        .from('recipes')
-        .select(
-          'id, dish_name, servings, category, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at',
-        )
-        .eq('is_planned', true)
-
-      if (recErr) {
-        setError(recErr.message)
-        setLoading(false)
-        return
-      }
-
-      const recipes = (data ?? []) as Recipe[]
-      const ids = recipes.map((r) => r.id)
-
-      // カロリー・費用（材料マスタから計算した1人前あたり）。読めなくても献立自体は表示する
-      const nutrition = new Map<string, { kcal: number | null; price: number | null; unresolved: number }>()
-      if (ids.length > 0) {
-        const { data: nutData, error: nutErr } = await supabase
-          .from('recipe_nutrition')
-          .select('recipe_id, calorie_per_serving, price_per_serving, unresolved_count')
-          .in('recipe_id', ids)
-        if (nutErr) {
-          console.error(nutErr)
-        } else {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ;(nutData ?? []).forEach((n: any) => {
-            nutrition.set(String(n.recipe_id), {
-              kcal: typeof n.calorie_per_serving === 'number' ? n.calorie_per_serving : null,
-              price: typeof n.price_per_serving === 'number' ? n.price_per_serving : null,
-              unresolved: typeof n.unresolved_count === 'number' ? n.unresolved_count : 0,
-            })
-          })
-        }
-      }
-
-      setRows(
-        recipes.map((r) => {
-          const n = nutrition.get(r.id)
-          return { ...r, kcal: n?.kcal ?? null, price: n?.price ?? null, unresolved: n?.unresolved ?? 0 }
-        }),
+  const load = useCallback(async () => {
+    const { data, error: recErr } = await supabase
+      .from('recipes')
+      .select(
+        'id, dish_name, servings, category, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at',
       )
+      .eq('is_planned', true)
+
+    if (recErr) {
+      setError(recErr.message)
       setLoading(false)
-    })()
+      return
+    }
+
+    const recipes = (data ?? []) as Recipe[]
+    const ids = recipes.map((r) => r.id)
+
+    // カロリー・費用（材料マスタから計算した1人前あたり）。読めなくても献立自体は表示する
+    const nutrition = new Map<string, { kcal: number | null; price: number | null; unresolved: number }>()
+    if (ids.length > 0) {
+      const { data: nutData, error: nutErr } = await supabase
+        .from('recipe_nutrition')
+        .select('recipe_id, calorie_per_serving, price_per_serving, unresolved_count')
+        .in('recipe_id', ids)
+      if (nutErr) {
+        console.error(nutErr)
+      } else {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(nutData ?? []).forEach((n: any) => {
+          nutrition.set(String(n.recipe_id), {
+            kcal: typeof n.calorie_per_serving === 'number' ? n.calorie_per_serving : null,
+            price: typeof n.price_per_serving === 'number' ? n.price_per_serving : null,
+            unresolved: typeof n.unresolved_count === 'number' ? n.unresolved_count : 0,
+          })
+        })
+      }
+    }
+
+    setRows(
+      recipes.map((r) => {
+        const n = nutrition.get(r.id)
+        return { ...r, kcal: n?.kcal ?? null, price: n?.price ?? null, unresolved: n?.unresolved ?? 0 }
+      }),
+    )
+    setError(null)
+    setLoading(false)
   }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  // 家族が候補・確定を変えたとき、すぐ反映する（Supabase Realtime）
+  //   ・自分の操作中（busy）は読み込み直しを後ろに回す。短時間に何度も来ても1回にまとめる（0.3秒）
+  useEffect(() => {
+    let timer: number | undefined
+    const reload = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        if (busyRef.current) reload()
+        else void load()
+      }, 300)
+    }
+    // StrictModeで2回動いても名前がぶつからないよう、毎回ちがう名前にする
+    const channel = supabase
+      .channel(`menu-recipes-${Math.random().toString(36).slice(2)}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'recipes' }, reload)
+      .subscribe()
+    return () => {
+      window.clearTimeout(timer)
+      void supabase.removeChannel(channel)
+    }
+  }, [load])
+
+  // 別のアプリから戻ったときにも、最新を読み込み直す（Realtimeが切れていた場合の保険）
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && !busyRef.current) void load()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [load])
 
   // 「元に戻す」メッセージは5秒で自動的に消す
   useEffect(() => {
@@ -172,8 +208,10 @@ export default function MenuPage() {
   const act = async (row: MenuRow, patch: Patch, message: string) => {
     if (busy) return
     setBusy(true)
+    busyRef.current = true
     const before = snapshot(row)
     const ok = await applyPatch(row.id, patch)
+    busyRef.current = false
     setBusy(false)
     if (!ok) return
     setToast({
@@ -204,6 +242,7 @@ export default function MenuPage() {
   const markCooked = async (r: MenuRow) => {
     if (busy) return
     setBusy(true)
+    busyRef.current = true
     const before = snapshot(r)
 
     // ① 作った日付を保存（先に保存。あとの更新に失敗したら、この履歴を消す）
@@ -218,6 +257,7 @@ export default function MenuPage() {
       if (logErr) throw logErr
       logId = (data as { id: string }).id
     } catch (e) {
+      busyRef.current = false
       setBusy(false)
       alert(
         '作った日付の記録に失敗しました：' +
@@ -235,6 +275,7 @@ export default function MenuPage() {
       planned_at: null,
       cook_count: r.cook_count + 1,
     })
+    busyRef.current = false
     setBusy(false)
     if (!ok) {
       await supabase.from('cook_logs').delete().eq('id', logId)
@@ -357,7 +398,7 @@ export default function MenuPage() {
           <div className="mt-4" />
           <SectionTitle icon="💭" title="候補" count={candidates.length} hint="→確定 ←削除" />
           {candidates.length === 0 ? (
-            <Empty text="候補はありません（レシピ一覧で右スワイプ／＋で追加）" />
+            <Empty text="候補はありません（レシピ一覧で左スワイプ／＋で追加）" />
           ) : (
             <div className="space-y-1">
               {candidates.map((r) => (

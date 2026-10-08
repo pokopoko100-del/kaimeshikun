@@ -60,7 +60,9 @@ ingredient_name text NOT NULL
 quantity text
 unit text
 note text
-preparation text"
+preparation text
+step_id uuid
+group_label text"
 TABLE,profiles,"id uuid NOT NULL
 display_name text
 created_at timestamp with time zone NOT NULL DEFAULT now()"
@@ -115,7 +117,8 @@ TABLE,steps,"id uuid NOT NULL DEFAULT gen_random_uuid()
 recipe_id uuid NOT NULL
 step_number integer NOT NULL
 step_name text
-description text"
+description text
+tip text"
 CONSTRAINT,cook_logs,"cook_logs_cooked_by_fkey: FOREIGN KEY (cooked_by) REFERENCES profiles(id)
 cook_logs_household_id_fkey: FOREIGN KEY (household_id) REFERENCES households(id) ON DELETE CASCADE
 cook_logs_recipe_id_fkey: FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
@@ -131,8 +134,10 @@ ingredient_master_created_by_fkey: FOREIGN KEY (created_by) REFERENCES profiles(
 ingredient_master_household_id_fkey: FOREIGN KEY (household_id) REFERENCES households(id) ON DELETE CASCADE
 ingredient_master_pkey: PRIMARY KEY (id)
 ingredient_master_household_id_ingredient_name_key: UNIQUE (household_id, ingredient_name)"
-CONSTRAINT,ingredients,"ingredients_ingredient_master_id_fkey: FOREIGN KEY (ingredient_master_id) REFERENCES ingredient_master(id) ON DELETE SET NULL
+CONSTRAINT,ingredients,"ingredients_group_label_chk: CHECK (((group_label IS NULL) OR (group_label ~ '^[A-Z]$'::text)))
+ingredients_ingredient_master_id_fkey: FOREIGN KEY (ingredient_master_id) REFERENCES ingredient_master(id) ON DELETE SET NULL
 ingredients_recipe_id_fkey: FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
+ingredients_step_fk: FOREIGN KEY (step_id, recipe_id) REFERENCES steps(id, recipe_id) ON DELETE SET NULL (step_id)
 ingredients_pkey: PRIMARY KEY (id)"
 CONSTRAINT,profiles,"profiles_id_fkey: FOREIGN KEY (id) REFERENCES auth.users(id) ON DELETE CASCADE
 profiles_pkey: PRIMARY KEY (id)"
@@ -157,7 +162,8 @@ CONSTRAINT,shopping_lists,"shopping_lists_created_by_fkey: FOREIGN KEY (created_
 shopping_lists_household_id_fkey: FOREIGN KEY (household_id) REFERENCES households(id) ON DELETE CASCADE
 shopping_lists_pkey: PRIMARY KEY (id)"
 CONSTRAINT,steps,"steps_recipe_id_fkey: FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
-steps_pkey: PRIMARY KEY (id)"
+steps_pkey: PRIMARY KEY (id)
+steps_id_recipe_key: UNIQUE (id, recipe_id)"
 INDEX,cook_logs,"CREATE UNIQUE INDEX cook_logs_pkey ON public.cook_logs USING btree (id)
 CREATE INDEX cook_logs_recipe_idx ON public.cook_logs USING btree (recipe_id, cooked_on DESC)"
 INDEX,household_members,"CREATE UNIQUE INDEX household_members_pkey ON public.household_members USING btree (household_id, user_id)"
@@ -166,7 +172,8 @@ INDEX,ingredient_master,"CREATE INDEX idx_ingredient_master_hh ON public.ingredi
 CREATE UNIQUE INDEX ingredient_master_household_id_ingredient_name_key ON public.ingredient_master USING btree (household_id, ingredient_name)
 CREATE UNIQUE INDEX ingredient_master_pkey ON public.ingredient_master USING btree (id)"
 INDEX,ingredients,"CREATE INDEX idx_ingredients_recipe ON public.ingredients USING btree (recipe_id)
-CREATE UNIQUE INDEX ingredients_pkey ON public.ingredients USING btree (id)"
+CREATE UNIQUE INDEX ingredients_pkey ON public.ingredients USING btree (id)
+CREATE INDEX ingredients_step_id_idx ON public.ingredients USING btree (step_id)"
 INDEX,profiles,CREATE UNIQUE INDEX profiles_pkey ON public.profiles USING btree (id)
 INDEX,recipes,"CREATE INDEX idx_recipes_household ON public.recipes USING btree (household_id)
 CREATE INDEX idx_recipes_is_planned ON public.recipes USING btree (household_id, is_planned)
@@ -177,6 +184,7 @@ CREATE UNIQUE INDEX shopping_items_pkey ON public.shopping_items USING btree (id
 INDEX,shopping_lists,"CREATE INDEX idx_shopping_lists_hh ON public.shopping_lists USING btree (household_id)
 CREATE UNIQUE INDEX shopping_lists_pkey ON public.shopping_lists USING btree (id)"
 INDEX,steps,"CREATE INDEX idx_steps_recipe ON public.steps USING btree (recipe_id)
+CREATE UNIQUE INDEX steps_id_recipe_key ON public.steps USING btree (id, recipe_id)
 CREATE UNIQUE INDEX steps_pkey ON public.steps USING btree (id)"
 POLICY,public.cook_logs,"cook_logs_delete / DELETE / USING is_household_member(household_id) / CHECK -
 cook_logs_insert / INSERT / USING - / CHECK (is_household_member(household_id) AND (EXISTS ( SELECT 1

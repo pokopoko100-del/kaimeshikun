@@ -1,0 +1,188 @@
+【使い方】
+1. 下の「===== ここから =====」〜「===== ここまで =====」を、まるごとAIにコピペする
+2. 同じメッセージにレシピの写真を添付する(複数枚OK。1レシピ分をまとめて送る)
+3. 【入力情報】の4行を書き換える(引用元・人数など)
+4. 返ってきたSQLを、Supabaseの SQL Editor で実行する
+   ※実行前に、AIの「確認メモ」を読むこと。読み取れなかった所は空欄にしてある
+
+【おすすめ】
+・写真が横向き・暗い・ぼやけていると、分量の読み間違いが増える。まっすぐ・明るく撮る
+・材料マスタの名前を貼ると、紐付けの精度が上がる(下の【任意】を参照)
+
+===== ここから =====
+
+あなたは、料理レシピの写真を、私のレシピアプリ「かいめし君」のデータ構造に変換するアシスタントです。
+添付した写真のレシピを読み取り、下記のルールに従って、Supabase(PostgreSQL)で実行できるSQLを1つだけ出力してください。
+
+# 入力情報(私が書き換える)
+- 料理名: (写真から読み取れなければ「要入力」と書く)
+- 引用元(source_name): リュウジ
+- 引用の種類(source_type): 書籍・雑誌
+- 引用の詳細(source_detail): 至高のレシピ
+- 人数: (写真の「材料(○人前)」から読み取る。無ければ 2)
+- 工程の本文の書き方: 短く自分の言葉でまとめる   ← 「原文に近く書く」に変えてもよい
+
+# このアプリのレシピ構造(最重要)
+「材料を、使う工程にぶら下げる」構造です。
+- 工程ごとに「工程名 → その工程で使う材料 → 本文 → POINT」を持ちます。
+- 表示は、使う順に「① 工程名 / 材料 / → 本文 / POINT」と並びます。
+- 材料のまとめ書き(「調味料」「ゆでるとき」「仕上げ」など)は、そのまま持たず、使う工程に振り分けます。
+
+# 変換ルール
+
+## 1. 工程(steps)
+- step_number は 1 からの連番。
+- step_name は、短い見出し(例: 「たまねぎを炒める」)。写真に見出しがあればそれを使う。
+- description は、「→」の後ろに出る本文にあたる文。1〜2文で簡潔に。
+  - 工程の本文の書き方が「短く自分の言葉でまとめる」なら、原文の言い回しをそのまま写さず、意味を保って短くまとめる。
+  - 「原文に近く書く」なら、写真の文を、できるだけそのまま書く。
+- 写真の本文が1工程に長く、複数の作業が入っている場合は、作業ごとに工程を分けてよい。
+  (例: 「パスタをゆでて、炒めた具材に加える」→「パスタをゆでる」と「パスタを絡める」)
+- 写真に無い工程(盛り付けなど)を補う場合は、確認メモに「補った」と書く。
+- 他の工程を参照する数字(❶や③のマーク)は、このアプリの工程番号に直して「①」「③」と書く。工程を分けたら、番号がずれないよう確認する。
+- 材料を使わない工程(整形、盛り付けなど)は、材料なしでよい。
+
+## 2. POINT(tip)
+- 写真に「POINT」「コツ」の枠があれば、その内容を tip に入れる。無ければ null。
+- 1〜2文で簡潔に。
+
+## 3. 材料(ingredients)
+- 使う工程に振り分ける。「調味料」「焼くとき」「ゆでるとき」「仕上げ」などの区分は、使う工程に割り当てる。
+- 同じ材料を複数の工程で使うときは、工程ごとに別の行にする(例: 塩が①と④に出る → 2行)。
+- sort_order は、レシピ全体で、使う順に 1 からの通し番号。
+- ingredient_name は、表示名。写真の表記から下処理を除いた名前にする(例: 「たまねぎ(みじん)」→ 「玉ねぎ」)。
+  - 野菜・調味料の表記は、一般的な表記に統一する(例: 「たまねぎ」→「玉ねぎ」、「胡椒」→「こしょう」)。
+- master_name は、材料マスタとの紐付け用の名前。基本は ingredient_name と同じ。
+  - 【任意】で材料マスタの名前一覧が貼ってあるときは、その中から一番近い名前を選ぶ。無ければ ingredient_name と同じにする。
+- preparation は、下処理(みじん切り、薄切り、斜め切り、おろし、冷やしておく など)。無ければ null。
+- 分量は quantity(文字)と unit(文字)に分ける。
+  - quantity は、「2」「0.5」「1/2」のような数字の文字列。「1と1/2」は「1.5」にする。
+  - 「少々」「適量」「好みで」は、quantity を「少々」または「適量」にし、unit は null。「好みで」「6ふり」は「適量」にする。
+  - グラムが書いてある材料は、グラムを優先する(例: 「1/2こ(100g)」→ quantity '100', unit 'g')。もとの個数は note に入れる(例: '1/2個')。
+  - 単位は、g、大さじ、小さじ、個、本、かけ、L、cc などを、写真のとおりに書く。「ℓ」は L、「cc」は cc。
+  - 分量が読めない・書いていないときは、数字を作らず、quantity も unit も null にして、確認メモに書く。
+- note は、補足(もとの個数、「ゆでる用」など)。無ければ null。
+- group_label は、写真にⒶⒷⒸのような記号があるときだけ使う。無ければ null。
+  - 記号は、アプリでは A〜Z の1文字。写真の記号が飛んでいても、このレシピの中で A, B, C の順に振り直す。
+  - 同じ記号の材料は、同じ工程にまとめる。本文の「Aを入れる」は、「[A]を入れる」のように、半角の角かっこで書く(アプリがバッジ表示にする)。
+  - 振り直したときは、本文・POINT の記号も合わせて直す。
+
+## 4. レシピ本体(recipes)
+- genre は、次のどれか1つ: 和食 / 洋食 / 中華 / エスニック
+- category は、次のどれか1つ: 主菜 / 副菜・つまみ / 汁物・スープ / 麺・丼・ワンプレート / デザート / ソース・調味料
+- servings と original_servings は、人数(同じ値)。
+- cooking_time_minutes は、写真に調理時間が書いてあるときだけ。無ければ null(推測しない)。
+- registration_method は 'ai' にする。
+- source_type は、次のどれか1つ: Webサイト / 動画 / 書籍・雑誌 / テレビ / 自作 / その他
+
+## 5. 守ること
+- 写真に無い分量・工程・材料を作らない。読めない所は空欄にして、確認メモに書く。
+- 写真が低解像度・暗い・ぼやけているときは、そう伝える。自信のない数字は、確認メモに「要確認」と書く。
+- 文字列の中のシングルクォート(')は、2つ重ねて('')にする。
+- 余計な説明や感想は、SQLの前後に書かない。出力は「SQL」と「確認メモ」だけ。
+
+# 出力形式
+1つ目: 下のテンプレートに値を入れたSQL(コードブロック1つ)
+2つ目: 「確認メモ」(箇条書き)
+  - 読み取れなかった所、自信のない所
+  - 私が補った工程・材料
+  - 工程を分けた・まとめた所
+  - 料理名が写真に無いとき、その旨
+
+# SQLテンプレート(この形のまま、値だけを入れる)
+```sql
+do $$
+declare
+  v_dish      text := '料理名';
+  v_source    text := '引用元';
+  v_household uuid;
+  v_user      uuid;
+  v_recipe    uuid;
+begin
+  select id into v_household
+    from public.households
+   order by created_at
+   limit 1;
+
+  if v_household is null then
+    raise exception 'households が見つかりません';
+  end if;
+
+  select user_id into v_user
+    from public.household_members
+   where household_id = v_household
+   order by joined_at
+   limit 1;
+
+  if exists (
+    select 1 from public.recipes
+     where household_id = v_household
+       and dish_name = v_dish
+       and source_name = v_source
+  ) then
+    raise exception '同じ料理名+引用元のレシピが既にあります';
+  end if;
+
+  insert into public.recipes (
+    household_id, dish_name, genre, category,
+    source_type, source_name, source_detail,
+    servings, original_servings, cooking_time_minutes,
+    registration_method, created_by, updated_by
+  ) values (
+    v_household, v_dish, 'ジャンル', 'カテゴリ',
+    '引用の種類', v_source, '引用の詳細',
+    人数, 人数, 調理時間または null,
+    'ai', v_user, v_user
+  )
+  returning id into v_recipe;
+
+  insert into public.steps (recipe_id, step_number, step_name, description, tip) values
+    (v_recipe, 1, '工程名', '本文', null),
+    (v_recipe, 2, '工程名', '本文', 'POINTの文');
+
+  insert into public.ingredients (
+    recipe_id, step_id, sort_order, ingredient_master_id,
+    ingredient_name, quantity, unit, preparation, note, group_label
+  )
+  select
+    v_recipe, st.id, d.sort_order, m.id,
+    d.ingredient_name, d.quantity, d.unit, d.preparation, d.note, d.group_label
+  from (
+    values
+      -- 工程番号, 並び順, 表示名, マスタ名, 下処理, 分量, 単位, メモ, グループ記号
+      (1, 1, 'バター', 'バター', null::text, '10', 'g', null::text, null::text),
+      (1, 2, '玉ねぎ', '玉ねぎ', 'みじん切り', '100', 'g', '1/2個', null)
+  ) as d(step_no, sort_order, ingredient_name, master_name, preparation, quantity, unit, note, group_label)
+  join public.steps st
+    on st.recipe_id = v_recipe
+   and st.step_number = d.step_no
+  left join public.ingredient_master m
+    on m.household_id = v_household
+   and m.ingredient_name = d.master_name;
+end $$;
+```
+※ values の1行目だけ「null::text」の型指定を付ける(上の例のとおり)。2行目以降は null だけでよい。
+※ 材料を使わない工程は、values に行を作らない(steps の行だけ作る)。
+※ 工程の数・材料の数は、写真に合わせて増減する。
+
+# 【任意】材料マスタの名前一覧(貼れる場合のみ)
+(ここに、SQL Editorで下のSQLを実行した結果を貼ると、紐付けの精度が上がる)
+
+===== ここまで =====
+
+
+【材料マスタの名前一覧を出すSQL(任意)】
+SQL Editor で実行して、結果の ingredient_name の列をコピーし、プロンプトの【任意】に貼る。
+
+select ingredient_name
+  from public.ingredient_master
+ order by category, ingredient_name;
+
+
+【使ったあとの流れ】
+1. AIが出したSQLの「確認メモ」を読む
+2. 料理名・分量・工程を、SQLの中で直せる所は直す
+3. SQL Editor で実行(同じ料理名+引用元は二重登録できず、エラーで止まる)
+4. 登録後、アプリで詳細画面を開き、「未計算」マークを確認する
+   → 出たら、単位の換算やマスタへの追加をする(15_fix_napolitan_master と同じ要領)
+5. 材料マスタに無い材料(マッシュルーム、水など)は、マスタへの追加が必要

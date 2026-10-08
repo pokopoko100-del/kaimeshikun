@@ -1,4 +1,5 @@
 // src/pages/ShoppingPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：家族が追加・チェック・削除・並べ替えをしたとき、すぐ画面に反映（Supabase Realtime）
 // 前提：10_shopping_migration.sql を実行済み
 // 買い物リスト：
 //   ・一番上の帯（タイトル・自動配置）はスクロールしても固定
@@ -104,6 +105,30 @@ export default function ShoppingPage() {
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [load])
+
+  // 家族の操作（追加・カゴに入れた・削除・並べ替え）を、すぐ反映する（Supabase Realtime）
+  //   ・短時間に何度も来ても1回にまとめる（0.3秒）
+  //   ・ドラッグ中は画面を入れ替えないよう、少し待ってから読み込み直す
+  //   ・DELETEはテーブル全体を購読する（RLSがあるので、見えるのは自分の世帯の分だけ）
+  useEffect(() => {
+    let timer: number | undefined
+    const reload = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        if (dragActiveRef.current) reload()
+        else void load()
+      }, 300)
+    }
+    // StrictModeで2回動いても名前がぶつからないよう、毎回ちがう名前にする
+    const channel = supabase
+      .channel(`shopping-items-${Math.random().toString(36).slice(2)}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shopping_items' }, reload)
+      .subscribe()
+    return () => {
+      window.clearTimeout(timer)
+      void supabase.removeChannel(channel)
+    }
   }, [load])
 
   // 「元に戻す」メッセージは5秒で自動的に消す
