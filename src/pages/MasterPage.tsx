@@ -1,7 +1,11 @@
-
 // src/pages/MasterPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：ingredient_units テーブル（複数単位の対応）を作成済みであること
 // 今回の変更：
+//  ・検索ボックスの右に「＋」ボタン：材料名をテキストで入力して、AIで追加（栄養素・価格・旬・単位を推定。レシピ取り込みと同じ登録画面）
+//  ・材料を長押しすると、「編集」か「この材料を使うレシピを探す」を選べる
+//      編集：同じ画面で、今の値を直せる。「AIで再取得」で、栄養素・価格・旬・単位をAIの推定値に置き換えられる
+//  ・追加・編集のあとは、一覧を読み込み直す
+// 前回までの変更：
 //  ・材料を開いたとき、「単位」の追加・編集・削除フォームを表示（大さじ・小さじ・個・枚…を何個でも登録）
 //    基準の単位を変えたときは、材料マスタの default_unit / unit_weight_g も自動でそろえる（一覧の「1単位あたり」表示に反映）
 // これまでの修正：
@@ -11,11 +15,17 @@
 //  ④ いつもの商品の画像を登録（詳細を開く→画像を登録）。一覧では小さく表示し、タップで拡大
 //  ⑤ チップを2段に変更（1段目：すべて・旬のみ／2段目：カテゴリ）
 import { useEffect, useMemo, useState } from 'react';
+import { useOutletContext } from 'react-router-dom';
+import type { Session } from '@supabase/supabase-js';
 import { supabase } from '../supabaseClient';
 import type { IngredientCategory, IngredientMaster } from '../types/ingredient';
 import { NUTRIENT_INFO_LIST, getNutrientInfo } from '../data/nutrientInfo';
 import IngredientUnitsEditor from '../components/IngredientUnitsEditor';
 import type { UnitRow } from '../components/IngredientUnitsEditor';
+import LongPressArea from '../components/LongPressArea';
+import IngredientActionSheet from '../components/IngredientActionSheet';
+import RecipesUsingSheet from '../components/RecipesUsingSheet';
+import MasterIngredientEditor from '../components/MasterIngredientEditor';
 
 const CATEGORIES: IngredientCategory[] = [
   '野菜',
@@ -54,6 +64,9 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
 
 // 拡大表示中の画像
 type Lightbox = { url: string; title: string };
+
+// 追加・編集の画面（null＝閉じている）
+type EditorState = { mode: 'add' } | { mode: 'edit'; item: IngredientMaster } | null;
 
 // 数値を「値がある時だけ」表示するための小さなヘルパー
 function fmt(value: number | null, unit: string) {
@@ -169,6 +182,7 @@ function errorText(e: unknown): string {
 }
 
 export default function MasterPage() {
+  const { session } = useOutletContext<{ session: Session }>();
   const [items, setItems] = useState<IngredientMaster[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -185,10 +199,23 @@ export default function MasterPage() {
   // 材料ごとの単位表（材料ID → 単位の一覧）。読み込みに失敗したときは undefined のまま
   const [unitsByMaster, setUnitsByMaster] = useState<Record<string, UnitRow[]> | null>(null);
   const [unitsFailed, setUnitsFailed] = useState(false);
+  // 長押しメニュー・追加／編集の画面・レシピ検索
+  const [actionTarget, setActionTarget] = useState<IngredientMaster | null>(null);
+  const [editor, setEditor] = useState<EditorState>(null);
+  const [usingTarget, setUsingTarget] = useState<IngredientMaster | null>(null);
+  const [reloadKey, setReloadKey] = useState(0); // 増やすと、一覧を読み込み直す
+  const [toast, setToast] = useState<string | null>(null);
+
+  // 「登録しました」などのメッセージは、3秒で消す
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   useEffect(() => {
     const fetchIngredients = async () => {
-      setLoading(true);
+      if (reloadKey === 0) setLoading(true); // 読み込み直しのときは、一覧を出したままにする
       setErrorMessage(null);
       const { data, error } = await supabase
         .from('ingredient_master')
@@ -216,6 +243,7 @@ export default function MasterPage() {
         console.error(unitError);
         setUnitsFailed(true);
       } else {
+        setUnitsFailed(false);
         const grouped: Record<string, UnitRow[]> = {};
         (unitData ?? []).forEach((u) => {
           const row = { ...(u as UnitRow), weight_g: Number((u as UnitRow).weight_g) };
@@ -238,7 +266,7 @@ export default function MasterPage() {
       }
     };
     fetchIngredients();
-  }, []);
+  }, [reloadKey]);
 
   const filteredItems = useMemo(() => {
     const keyword = searchText.trim().toLowerCase();
@@ -360,6 +388,19 @@ export default function MasterPage() {
     }
   };
 
+  // 材料の名前・カテゴリだけを持つ一覧（追加・編集の名前の重複チェックに使う）
+  const masterOptions = useMemo(
+    () => items.map((i) => ({ id: i.id, name: i.ingredient_name, category: i.category, units: [] as string[] })),
+    [items],
+  );
+
+  // 追加・編集が終わったとき：画面を閉じて、一覧を読み込み直す
+  const handleSaved = (message: string) => {
+    setEditor(null);
+    setToast(message);
+    setReloadKey((k) => k + 1);
+  };
+
   const infoNutrient = infoModalKey ? getNutrientInfo(infoModalKey) : null;
   // 現在プルダウンで選んでいる栄養素（カテゴリ順の時はnull）
   const selectedSortNutrient = sortKey !== 'default' ? getNutrientInfo(sortKey as keyof IngredientMaster) : null;
@@ -368,13 +409,25 @@ export default function MasterPage() {
     <div className="min-h-screen bg-gray-50 pb-20">
       {/* 上部固定エリア：検索・絞り込み・並び替え・件数 */}
       <div className="sticky top-0 z-10 bg-white px-4 pt-4 pb-3 shadow-sm">
-        <input
-          type="text"
-          value={searchText}
-          onChange={(e) => setSearchText(e.target.value)}
-          placeholder="材料名・銘柄で検索"
-          className="w-full rounded-full border border-gray-300 px-4 py-2 text-sm focus:border-amber-500 focus:outline-none"
-        />
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            placeholder="材料名・銘柄で検索"
+            className="min-w-0 flex-1 rounded-full border border-gray-300 px-4 py-2 text-sm focus:border-amber-500 focus:outline-none"
+          />
+          {/* 材料をAIで追加 */}
+          <button
+            type="button"
+            onClick={() => setEditor({ mode: 'add' })}
+            aria-label="材料をAIで追加"
+            title="材料をAIで追加"
+            className="shrink-0 rounded-full bg-orange-500 px-3.5 py-1.5 text-base font-bold leading-none text-white active:opacity-80"
+          >
+            ＋
+          </button>
+        </div>
 
         {/* 1段目：すべて・旬のみ */}
         <div className="mt-3 flex gap-2">
@@ -448,7 +501,10 @@ export default function MasterPage() {
 
         {/* 件数（左）＋ 「100gあたり」の固定表示（右。各レコードの数値の真上に来る） */}
         <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-          <span>{loading ? '読み込み中…' : `${filteredItems.length}件`}</span>
+          <span>
+            {loading ? '読み込み中…' : `${filteredItems.length}件`}
+            {!loading && <span className="ml-2 text-[10px] text-gray-400">長押しで編集・レシピ検索</span>}
+          </span>
           <span className="rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-600">
             100gあたり
           </span>
@@ -504,16 +560,9 @@ export default function MasterPage() {
               return (
                 <div key={item.id} className="rounded-xl bg-white shadow-sm">
                   {/* カード本体（ボタンの中にボタンを入れないよう div + role="button"） */}
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => toggleExpand(item.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        toggleExpand(item.id);
-                      }
-                    }}
+                  <LongPressArea
+                    onTap={() => toggleExpand(item.id)}
+                    onLongPress={() => setActionTarget(item)}
                     className="flex w-full cursor-pointer items-center px-4 py-3 text-left"
                   >
                     {/* 左：①分類＋旬 ②材料名 ③銘柄（すべて左揃え） */}
@@ -578,7 +627,7 @@ export default function MasterPage() {
                         </div>
                       )}
                     </div>
-                  </div>
+                  </LongPressArea>
 
                   {/* 展開時：栄養価・単価の詳細 */}
                   {isExpanded && (
@@ -730,6 +779,54 @@ export default function MasterPage() {
           </div>
         )}
       </div>
+
+      {/* 長押しメニュー：編集／この材料を使うレシピを探す */}
+      {actionTarget && (
+        <IngredientActionSheet
+          name={actionTarget.ingredient_name}
+          category={actionTarget.category}
+          onClose={() => setActionTarget(null)}
+          onEdit={() => {
+            setEditor({ mode: 'edit', item: actionTarget });
+            setActionTarget(null);
+          }}
+          onFindRecipes={() => {
+            setUsingTarget(actionTarget);
+            setActionTarget(null);
+          }}
+        />
+      )}
+
+      {/* この材料を使うレシピ */}
+      {usingTarget && (
+        <RecipesUsingSheet
+          master={{ id: usingTarget.id, name: usingTarget.ingredient_name }}
+          onClose={() => setUsingTarget(null)}
+        />
+      )}
+
+      {/* 材料の追加・編集（画面いっぱい） */}
+      {editor && (
+        <MasterIngredientEditor
+          key={editor.mode === 'edit' ? editor.item.id : 'add'}
+          mode={editor.mode}
+          item={editor.mode === 'edit' ? editor.item : undefined}
+          masters={masterOptions}
+          userId={session.user.id}
+          onClose={() => setEditor(null)}
+          onSaved={handleSaved}
+        />
+      )}
+
+      {/* 「登録しました」などのメッセージ */}
+      {toast && (
+        <div
+          className="pointer-events-none fixed inset-x-0 z-[80] flex justify-center px-3"
+          style={{ bottom: 'calc(4.5rem + env(safe-area-inset-bottom))' }}
+        >
+          <div className="rounded-xl bg-gray-900 px-4 py-2.5 text-sm text-white shadow-lg">{toast}</div>
+        </div>
+      )}
 
       {/* 画像の拡大表示（どこをタップしても閉じる） */}
       {lightbox && (

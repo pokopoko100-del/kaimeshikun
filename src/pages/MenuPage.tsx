@@ -1,5 +1,10 @@
-
 // src/pages/MenuPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：
+//  ・レシピごとに「何人前つくるか」（planned_servings）を入れられるようにした（行の下の －○人前＋）。横に、レシピの標準の人前を表示
+//    献立に入れたときの初期値は、設定画面の「献立に追加したときの人数」。買い物リストの分量は、この人数で計算する
+//  ・カロリー・値段は「1人前」で表示（画面全体の人数切替はなくした）。上の「1食平均」も1人前
+// 前提：13_servings_migration.sql を実行済み
+// 前回の変更：
 // 今回の変更：①家族が候補・確定を変えたとき、すぐ画面に反映（Supabase Realtime）／②空欄メッセージを「レシピ一覧で右スワイプ」に統一（レシピ一覧のスワイプを右向きに変更したため）
 // 前提：09_menu_status_migration.sql（plan_confirmed 列）と 11_cook_logs_migration.sql（cook_logs テーブル）を実行済み
 // 献立画面：日割りなし。「確定」と「候補」の2つのリストを、小さな行（料理名＋引用元）で並べる（ボタンなし・スワイプで操作）
@@ -8,7 +13,6 @@
 // 一番上（スクロールしても固定）：
 //   ・1食あたりの平均価格・平均カロリー（食事回数＝確定した「主菜」と「麺・丼・ワンプレート」の数）
 //   ・「🛒 買い物リストに追加」ボタン
-// 人数切替は「確定」見出しの右端（共通設定。一覧・詳細と同じ人数で表示）
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useOutletContext } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
@@ -18,7 +22,6 @@ import SwipeRow from '../components/SwipeRow'
 import type { SwipeAction } from '../components/SwipeRow'
 import ServingsStepper from '../components/ServingsStepper'
 import ShoppingAddSheet from '../components/ShoppingAddSheet'
-import { useServings } from '../lib/useServings'
 import { getHouseholdId } from '../lib/household'
 import { todayLocal } from '../lib/dates'
 import { errorText } from '../lib/errorText'
@@ -36,6 +39,7 @@ type Recipe = Pick<
   | 'plan_confirmed'
   | 'planned_by'
   | 'planned_at'
+  | 'planned_servings'
 >
 
 type MenuRow = Recipe & {
@@ -54,6 +58,11 @@ type Patch = {
 }
 
 type Toast = { message: string; actionLabel: string; onAction: () => void }
+
+// 何人前つくるか（未設定のときは、レシピの標準の人前）
+function plannedOf(r: Pick<Recipe, 'planned_servings' | 'servings'>): number {
+  return r.planned_servings ?? Math.max(1, r.servings || 1)
+}
 
 // 「1回の食事」として数えるサブカテゴリ（主菜と、麺・丼・ワンプレート）
 const MEAL_CATEGORIES = ['主菜', '麺・丼・ワンプレート']
@@ -98,14 +107,13 @@ export default function MenuPage() {
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false) // 自分の操作中は、Realtimeでの読み込み直しを止める
   const [toast, setToast] = useState<Toast | null>(null)
-  const [servings, setServings] = useServings()
   const [showAdd, setShowAdd] = useState(false) // 「買い物リストに追加」の確認画面
 
   const load = useCallback(async () => {
     const { data, error: recErr } = await supabase
       .from('recipes')
       .select(
-        'id, dish_name, servings, category, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at',
+        'id, dish_name, servings, category, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at, planned_servings',
       )
       .eq('is_planned', true)
 
@@ -294,6 +302,27 @@ export default function MenuPage() {
     })
   }
 
+  // 何人前つくるか：変えるとすぐ保存（失敗したら元に戻す）
+  const setPlannedServings = async (r: MenuRow, n: number) => {
+    const prev = r.planned_servings
+    setRows((list) => list.map((x) => (x.id === r.id ? { ...x, planned_servings: n } : x)))
+    busyRef.current = true
+    const { data, error: updErr } = await supabase
+      .from('recipes')
+      .update({ planned_servings: n })
+      .eq('id', r.id)
+      .select('id')
+    busyRef.current = false
+    if (updErr || !data || data.length === 0) {
+      setRows((list) => list.map((x) => (x.id === r.id ? { ...x, planned_servings: prev } : x)))
+      alert(
+        '人数の保存に失敗しました: ' +
+          (updErr ? errorText(updErr) : '権限を確認してください') +
+          '（13_servings_migration.sql を実行済みか確認してください）',
+      )
+    }
+  }
+
   // 確定／候補に分ける（追加した順に並べる。新しいものが上）
   const { confirmed, candidates } = useMemo(() => {
     const byPlanned = (a: MenuRow, b: MenuRow) => (b.planned_at ?? '').localeCompare(a.planned_at ?? '')
@@ -311,9 +340,9 @@ export default function MenuPage() {
     let totalPrice = 0
     let uncertain = false
     for (const r of confirmed) {
-      if (r.kcal != null) totalKcal += r.kcal * servings
+      if (r.kcal != null) totalKcal += r.kcal
       else uncertain = true
-      if (r.price != null) totalPrice += r.price * servings
+      if (r.price != null) totalPrice += r.price
       else uncertain = true
       if (r.unresolved > 0) uncertain = true
     }
@@ -323,7 +352,7 @@ export default function MenuPage() {
       avgPrice: meals > 0 ? totalPrice / meals : null,
       uncertain,
     }
-  }, [confirmed, servings])
+  }, [confirmed])
 
   return (
     <div className="min-h-screen bg-gray-50 pb-6">
@@ -340,7 +369,7 @@ export default function MenuPage() {
               {' ・ '}
               <b className="text-gray-900">{fmtVal(stats.avgKcal, 'kcal')}</b>
               {stats.uncertain && <span className="text-amber-600">※</span>}
-              <span className="text-gray-400">（{servings}人前）</span>
+              <span className="text-gray-400">（1人前）</span>
             </span>
           ) : (
             <span className="min-w-0 truncate text-right text-gray-400">
@@ -375,7 +404,6 @@ export default function MenuPage() {
             title="確定"
             count={confirmed.length}
             hint="→作った ←戻す"
-            trailing={<ServingsStepper value={servings} onChange={setServings} />}
           />
           {confirmed.length === 0 ? (
             <Empty text="確定した料理はありません（候補を右にスワイプ）" />
@@ -389,7 +417,7 @@ export default function MenuPage() {
                   onSwipeRight={() => markCooked(r)}
                   onSwipeLeft={() => backToCandidate(r)}
                 >
-                  <MenuLine row={r} servings={servings} />
+                  <MenuLine row={r} onServings={(n) => void setPlannedServings(r, n)} />
                 </SwipeRow>
               ))}
             </div>
@@ -410,7 +438,7 @@ export default function MenuPage() {
                   onSwipeRight={() => confirm(r)}
                   onSwipeLeft={() => removeFromMenu(r)}
                 >
-                  <MenuLine row={r} servings={servings} />
+                  <MenuLine row={r} onServings={(n) => void setPlannedServings(r, n)} />
                 </SwipeRow>
               ))}
             </div>
@@ -421,8 +449,12 @@ export default function MenuPage() {
       {/* 買い物リストに追加の確認画面（全画面） */}
       {showAdd && (
         <ShoppingAddSheet
-          recipes={confirmed.map((r) => ({ id: r.id, dish_name: r.dish_name, servings: r.servings }))}
-          servings={servings}
+          recipes={confirmed.map((r) => ({
+            id: r.id,
+            dish_name: r.dish_name,
+            servings: r.servings,
+            planned: plannedOf(r),
+          }))}
           userId={userId}
           onClose={() => setShowAdd(false)}
           onAdded={(count) => {
@@ -490,29 +522,29 @@ function Empty({ text }: { text: string }) {
   )
 }
 
-// ---------- 献立の1行（コンパクト：料理名＋引用元の2段／右に人数ぶんのカロリー・費用） ----------
-function MenuLine({ row: r, servings }: { row: MenuRow; servings: number }) {
-  const kcal = r.kcal != null ? r.kcal * servings : null
-  const price = r.price != null ? r.price * servings : null
+// ---------- 献立の1行：料理名＋引用元／右に1人前のカロリー・費用。下の段に「何人前つくるか」と標準の人前 ----------
+function MenuLine({ row: r, onServings }: { row: MenuRow; onServings: (n: number) => void }) {
   return (
-    <Link
-      to={`/recipes/${r.id}`}
-      draggable={false}
-      className="flex items-center gap-2 px-3 py-1.5 active:opacity-70"
-    >
-      {/* 左：①料理名 ②引用元（左揃え。長いときは省略） */}
-      <div className="min-w-0 flex-1 text-left">
-        <div className="truncate text-sm font-medium leading-tight text-gray-800">
-          {r.dish_name}
-          {r.unresolved > 0 && <span className="ml-1 text-[10px] font-normal text-amber-600">※</span>}
+    <div className="px-3 py-1.5">
+      <Link to={`/recipes/${r.id}`} draggable={false} className="flex items-center gap-2 active:opacity-70">
+        {/* 左：①料理名 ②引用元（左揃え。長いときは省略） */}
+        <div className="min-w-0 flex-1 text-left">
+          <div className="truncate text-sm font-medium leading-tight text-gray-800">
+            {r.dish_name}
+            {r.unresolved > 0 && <span className="ml-1 text-[10px] font-normal text-amber-600">※</span>}
+          </div>
+          {r.source_name && <div className="truncate text-[11px] leading-tight text-gray-400">{r.source_name}</div>}
         </div>
-        {r.source_name && <div className="truncate text-[11px] leading-tight text-gray-400">{r.source_name}</div>}
+        {/* 右：1人前のカロリー・費用 */}
+        <span className="shrink-0 whitespace-nowrap text-xs font-semibold text-gray-700">
+          {fmtVal(r.kcal, 'kcal')}　{fmtVal(r.price, '円')}
+        </span>
+      </Link>
+      {/* 何人前つくるか（スワイプと区別するため、ボタンだけで操作する） */}
+      <div className="mt-1 flex items-center justify-end gap-2">
+        <span className="text-[10px] text-gray-400">標準{r.servings}人前</span>
+        <ServingsStepper value={plannedOf(r)} onChange={onServings} min={1} max={20} />
       </div>
-
-      {/* 右：人数ぶんのカロリー・費用 */}
-      <span className="shrink-0 whitespace-nowrap text-xs font-semibold text-gray-700">
-        {fmtVal(kcal, 'kcal')}　{fmtVal(price, '円')}
-      </span>
-    </Link>
+    </div>
   )
 }

@@ -1,20 +1,25 @@
-// src/components/ServingsStepper.tsx（新規作成）
+// src/components/ServingsStepper.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 「－ 2人前 ＋」の人数切替ボタン
-import { MAX_SERVINGS, MIN_SERVINGS } from '../lib/useServings'
-
+// 今回の変更：最小・最大の人数を、使う場所ごとに変えられるようにした（min / max。省略すると 1〜20）
 export default function ServingsStepper({
   value,
   onChange,
+  min = 1,
+  max = 20,
+  disabled = false,
 }: {
   value: number
   onChange: (n: number) => void
+  min?: number
+  max?: number
+  disabled?: boolean
 }) {
   return (
     <div className="flex shrink-0 items-center overflow-hidden rounded-full border border-gray-300 bg-white text-xs font-bold text-gray-700">
       <button
         type="button"
-        onClick={() => onChange(value - 1)}
-        disabled={value <= MIN_SERVINGS}
+        onClick={() => onChange(Math.max(min, value - 1))}
+        disabled={disabled || value <= min}
         aria-label="人数を減らす"
         className="px-2.5 py-1 text-base leading-none active:bg-gray-100 disabled:opacity-30"
       >
@@ -23,8 +28,8 @@ export default function ServingsStepper({
       <span className="min-w-[3.2rem] text-center">{value}人前</span>
       <button
         type="button"
-        onClick={() => onChange(value + 1)}
-        disabled={value >= MAX_SERVINGS}
+        onClick={() => onChange(Math.min(max, value + 1))}
+        disabled={disabled || value >= max}
         aria-label="人数を増やす"
         className="px-2.5 py-1 text-base leading-none active:bg-gray-100 disabled:opacity-30"
       >

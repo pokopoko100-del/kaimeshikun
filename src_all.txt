@@ -942,7 +942,8 @@ export default function ImportPreviewEditor({
 }
 
 ===== src\components\IngredientRegisterStep.tsx =====
-// src/components/IngredientRegisterStep.tsx（新規作成）
+// src/components/IngredientRegisterStep.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：栄養素を3列で表示（カードの端まで幅を使う）／栄養素の「入力済み／空欄」の数を表示
 // レシピ取り込みの「材料の登録」画面の中身
 //   ・AIが読み取ったレシピに、材料マスタに無い材料（や、マスタに無い単位）があるとき、確認・修正の前に表示する
 //   ・栄養素・カロリー・価格・旬・単位（1単位が何gか）は、AIが推定した値が入っている。直してから登録できる
@@ -960,6 +961,9 @@ export type AiStatus = 'analyzing' | 'ready' | 'failed'
 const INPUT_BASE =
   'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-amber-500 focus:outline-none'
 const INPUT = `w-full ${INPUT_BASE}`
+// 栄養素の入力欄（3列で並べるので、左右の余白を少し狭くする）
+const NUTRIENT_INPUT =
+  'w-full rounded-lg border border-gray-300 bg-white px-2 py-2 text-sm focus:border-amber-500 focus:outline-none'
 
 const UNIT_SUGGESTIONS = ['個', '枚', '本', '片', 'かけ', '玉', '束', '袋', 'パック', '缶', '丁', '切れ', '尾', 'つまみ', '大さじ', '小さじ', 'ml', 'cc']
 
@@ -1169,6 +1173,7 @@ function ItemCard({
   const similar = useMemo(() => similarMasters(it.name, masters), [it.name, masters])
   const linked = it.linkTo !== ''
   const disabled = !it.checked
+  const filledCount = NUTRIENTS.filter((n) => it.nutrients[n.col].trim() !== '').length
 
   const setUnit = (key: string, patch: Partial<RegUnit>) =>
     onPatch({ units: it.units.map((u) => (u.key === key ? { ...u, ...patch } : u)) })
@@ -1314,26 +1319,28 @@ function ItemCard({
             </button>
           </div>
 
-          {/* 栄養素・旬 */}
-          <details>
+          {/* 栄養素・旬（左の字下げを打ち消して、カードの幅いっぱいに3列で並べる） */}
+          <details className="-ml-6">
             <summary className="cursor-pointer text-xs font-semibold text-gray-600">
               栄養素（100gあたり）・旬を確認する
-              {it.nutrients.calorie_per_100g !== '' && (
-                <span className="ml-1 font-normal text-gray-400">　{it.nutrients.calorie_per_100g}kcal</span>
-              )}
+              <span className="ml-1 font-normal text-gray-400">
+                {it.nutrients.calorie_per_100g !== '' && `${it.nutrients.calorie_per_100g}kcal ・ `}
+                入力済み{filledCount}／{NUTRIENTS.length}
+              </span>
             </summary>
 
-            <div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-2">
+            <div className="mt-2 grid grid-cols-3 gap-x-1.5 gap-y-2">
               {NUTRIENTS.map((n) => (
-                <label key={n.col} className="block">
-                  <span className="mb-0.5 block text-[11px] text-gray-500">
-                    {n.label}（{n.unit}）
+                <label key={n.col} className="block min-w-0">
+                  <span className="mb-0.5 block text-[10px] leading-tight text-gray-500">
+                    {n.label}
+                    <span className="text-gray-400">（{n.unit}）</span>
                   </span>
                   <input
-                    className={INPUT}
+                    className={NUTRIENT_INPUT}
                     value={it.nutrients[n.col]}
                     inputMode="decimal"
-                    placeholder="不明は空欄"
+                    placeholder="空欄"
                     onChange={(e) => onPatch({ nutrients: { ...it.nutrients, [n.col]: e.target.value } })}
                   />
                 </label>
@@ -2906,9 +2913,10 @@ export function getNutrientInfo(key: keyof IngredientMaster) {
 
 
 ===== src\lib\callFunction.ts =====
-// src/lib/callFunction.ts（新規作成）
+// src/lib/callFunction.ts（ファイル全体。これで丸ごと置き換えてください）
 // Supabase の関数（Edge Function）を呼ぶ共通部品。
 // 想定内のエラー（キー未登録・上限到達など）は、日本語のメッセージとコードで返ってくる。
+// 今回の変更：invoke の body の型エラー（TS2322）を直した（body を Record<string, unknown> として渡す）
 import { supabase } from '../supabaseClient'
 import { errorText } from './errorText'
 
@@ -2918,7 +2926,7 @@ export type CallResult<T> = ({ ok: true } & T) | CallFailure
 type Envelope = { ok?: boolean; code?: string; message?: string }
 
 export async function callFunction<T>(name: string, body: unknown): Promise<CallResult<T>> {
-  const { data, error } = await supabase.functions.invoke(name, { body })
+  const { data, error } = await supabase.functions.invoke(name, { body: body as Record<string, unknown> })
 
   if (error) {
     // ログイン切れ（401）などは、本文に理由が入っている
@@ -3652,6 +3660,9 @@ export function applyToDraft(
 //   ・保存は、この画面から recipes → steps → ingredients の順に行う（途中で失敗したら、作りかけのレシピを消して元に戻す）
 //   ・「未計算になるか」の判定は、レシピ詳細・サーバー側の関数（recipe_nutrition ビュー）と同じルール
 // 今回の変更：
+//   ・材料名の末尾の（　）が下ごしらえのときは、名前から外して「下ごしらえ」欄へ移す（splitPrep。ハム（千切り）→ ハム＋千切り）
+//   ・名前が材料マスタと同じ材料は、自動で結び付ける（relinkByName）
+// 前回の変更：
 //   ・調理時間をAIが推定したときのフラグ（cookingTimeEstimated）を追加
 //   ・保存のときに、料理写真（表示用）も一緒に保存できるようにした（saveDraft の3つ目の引数）
 //   ・関数の呼び出しを callFunction にまとめた／写真を縮める処理は recipePhoto に移した
@@ -3722,6 +3733,45 @@ export function circled(n: number): string {
 // 名前の比較用（全角半角・空白・大文字小文字をそろえる）
 export function normName(s: string): string {
   return (s ?? '').normalize('NFKC').replace(/\s+/g, '').toLowerCase()
+}
+
+// 材料名の末尾の（　）が「下ごしらえ」なら、名前から外して下ごしらえの欄へ移す
+//   例：「ハム（千切り）」→ 名前「ハム」・下ごしらえ「千切り」。「有塩」「白」など、材料の種類を表すものは名前に残す
+const KEEP_IN_NAME =
+  /^(有塩|無塩|無調整|国産|白|赤|黒|青|黄|生|乾燥|粉|粉末|顆粒|液体|チューブ|缶|缶詰|瓶|絹|木綿|薄口|濃口|合わせ|赤だし|白だし)$/
+
+export function splitPrep(name: string, prep: string | null | undefined): { name: string; preparation: string } {
+  let base = (name ?? '').trim()
+  const preps: string[] = []
+  for (let i = 0; i < 3; i++) {
+    const m = base.match(/^(.+?)\s*[（(]([^）)]*)[）)]\s*$/)
+    if (!m) break
+    const inner = m[2].trim()
+    if (inner === '') {
+      base = m[1].trim()
+      continue
+    }
+    if (KEEP_IN_NAME.test(inner.normalize('NFKC'))) break
+    preps.unshift(inner)
+    base = m[1].trim()
+  }
+  const own = (prep ?? '').trim()
+  const all = [...preps, ...(own && !preps.includes(own) ? [own] : [])]
+  return { name: base, preparation: all.join('・') }
+}
+
+// 名前が材料マスタと同じ（全角半角・空白の違いは無視）で、まだ結び付いていない材料を、自動で結び付ける
+export function relinkByName(d: Draft, masters: MasterOption[]): Draft {
+  if (masters.length === 0) return d
+  const byName = new Map(masters.map((m) => [normName(m.name), m]))
+  return {
+    ...d,
+    ingredients: d.ingredients.map((i) => {
+      if (i.masterId) return i
+      const hit = byName.get(normName(i.name))
+      return hit ? { ...i, masterId: hit.id, name: hit.name } : i
+    }),
+  }
 }
 
 // 分量の表記（大さじ・小さじは単位を先頭に：大さじ2／それ以外は数量を先頭に：300g）
@@ -3839,16 +3889,19 @@ function toDraft(r: ServerRecipe): Draft {
       description: s.description ?? '',
       tip: s.tip ?? '',
     })),
-    ingredients: (r.ingredients ?? []).map((i) => ({
-      key: newKey(),
-      name: i.ingredient_name ?? '',
-      masterId: i.ingredient_master_id ?? null,
-      quantity: i.quantity ?? '',
-      unit: normUnit(i.unit ?? ''),
-      preparation: i.preparation ?? '',
-      stepNo: i.step_number != null ? (noMap.get(i.step_number) ?? null) : null,
-      group: i.group_label ?? '',
-    })),
+    ingredients: (r.ingredients ?? []).map((i) => {
+      const sp = splitPrep(i.ingredient_name ?? '', i.preparation)
+      return {
+        key: newKey(),
+        name: sp.name,
+        masterId: i.ingredient_master_id ?? null,
+        quantity: i.quantity ?? '',
+        unit: normUnit(i.unit ?? ''),
+        preparation: sp.preparation,
+        stepNo: i.step_number != null ? (noMap.get(i.step_number) ?? null) : null,
+        group: i.group_label ?? '',
+      }
+    }),
   }
 }
 
@@ -6910,6 +6963,7 @@ import {
   compressForAi,
   fetchMasterOptions,
   newKey,
+  relinkByName,
   saveDraft,
   validateDraft,
 } from '../lib/recipeImport'
@@ -7068,14 +7122,16 @@ export default function RecipeImportPage() {
     }
     setAnalyzing(false)
 
-    setDraft(r.draft)
+    // 名前が材料マスタと同じ材料は、自動で結び付ける（古い関数の結果でも、ハム（千切り）→ ハム にそろう）
+    const readDraft = relinkByName(r.draft, ms)
+    setDraft(readDraft)
     setWarnings(r.warnings)
     setSaveError(null)
     setRegError(null)
     window.scrollTo(0, 0)
 
     // 材料マスタに無い材料（や単位）があれば、先に材料の登録画面を出す
-    const p = msFailed ? { items: [], unitAdds: [] } : buildPlan(r.draft, ms)
+    const p = msFailed ? { items: [], unitAdds: [] } : buildPlan(readDraft, ms)
     if (planIsEmpty(p)) {
       setPlan(null)
       setStage('preview')
@@ -9018,8 +9074,9 @@ function validWeight(v: unknown): number | null {
 }
 
 // ---------- Gemini に渡すスキーマ ----------
+// 栄養素と価格は「必須の数値」にして、AIが null（不明）で逃げられないようにする
 const nutrientProps = Object.fromEntries(
-  NUTRIENTS.map((n) => [n.col, { type: "NUMBER", nullable: true }]),
+  NUTRIENTS.map((n) => [n.col, { type: "NUMBER" }]),
 );
 
 const responseSchema = {
@@ -9032,7 +9089,7 @@ const responseSchema = {
         properties: {
           key: { type: "STRING" },
           category: { type: "STRING", enum: [...CATEGORIES] },
-          price_per_100g: { type: "NUMBER", nullable: true },
+          price_per_100g: { type: "NUMBER" },
           peak_season_months: { type: "ARRAY", items: { type: "INTEGER" } },
           default_unit: { type: "STRING" },
           units: {
@@ -9048,7 +9105,15 @@ const responseSchema = {
           },
           ...nutrientProps,
         },
-        required: ["key", "category", "peak_season_months", "default_unit", "units"],
+        required: [
+          "key",
+          "category",
+          "price_per_100g",
+          "peak_season_months",
+          "default_unit",
+          "units",
+          ...NUTRIENTS.map((n) => n.col),
+        ],
       },
     },
     unit_results: {
@@ -9069,15 +9134,20 @@ const responseSchema = {
 const SYSTEM_PROMPT = `あなたは、日本の家庭向け料理アプリの「食材データ作成」担当です。
 渡された食材ごとに、栄養・価格・単位の目安を、指定のJSONスキーマで出力してください。
 
-# 栄養素(すべて「その食材100gあたり」)
-- 日本食品標準成分表(八訂)の値を基準に、一般的な食材としての値を答える。生鮮食品は「生」、調味料や加工品は市販の一般的なもの。
+# 栄養素(すべて「その食材100gあたり」。21項目すべてに、必ず数値を入れる)
+- 日本食品標準成分表(八訂)の値を基準に、近い食材の値から推定して答える。生鮮食品は「生」、調味料や加工品は市販の一般的なもの。
+- 成分表で「Tr(微量)」「-(未測定)」の項目や、含まれないはずの項目は 0 を入れる。分からないからといって、空にしない。
+- 正確な値が分からないときは、同じ種類の食材(例:ハム→ロースハム、しょうが→しょうが生、きのこ→しいたけ)の値を参考に、もっともらしい値を入れる。目安でよい。
 - 単位:calorie=kcal / protein・fat・carbohydrate・sugar・dietary_fiber・salt=g / vitamin_a=µg(レチノール活性当量) / vitamin_b1・b2・b6・c・e=mg / vitamin_b12・d・folate=µg / calcium・iron・zinc・potassium・magnesium=mg
-- sugar は糖質(炭水化物から食物繊維を引いた値)。salt は食塩相当量。
-- 含まないことが明らかな項目は 0。分からない項目は null(推測で埋めない)。
-- たんぱく質+脂質+炭水化物は100gを超えない。
+- sugar は糖質(炭水化物から食物繊維を引いた値)。salt は食塩相当量(ナトリウムmg×2.54÷1000)。
+- たんぱく質+脂質+炭水化物は100gを超えない。糖質と食物繊維は炭水化物を超えない。カロリーは、たんぱく質×4+脂質×9+炭水化物(食物繊維を除く)×4 の近くにする。
+- 水・お茶・塩など、栄養がほぼ無い食材は、全項目 0 に近い値でよい。
 
-# 価格
-- price_per_100g は、日本のスーパーでの一般的な価格を、100gあたりの円(整数)で。分からなければ null。
+# 価格(必ず数値を入れる)
+- price_per_100g は、日本のスーパーでの一般的な価格を、100gあたりの円(整数)で推定する。必ず1以上の数値を入れる。
+- 液体・調味料は「容量あたりの価格 ÷ 重さ」で100gあたりに換算する(例:醤油1L約400円・約1.2kg → 約33円)。
+- 1個・1本・1パックで売られる食材は、1個あたりの価格 ÷ 重さ(g) × 100 で換算する。
+- 分からないときも、近い食材から推定した値を入れる(0や空にしない)。
 
 # 旬
 - peak_season_months は、日本で旬の月(1〜12の整数)。通年出回るもの・加工品・調味料は空の配列。
@@ -9119,6 +9189,8 @@ function cleanItem(raw: any, req: ReqItem) {
       nutrients[n.col] = round(v, 2);
     }
   }
+  const emptyCount = NUTRIENTS.filter((n) => nutrients[n.col] === null).length;
+  if (emptyCount >= 5) warnings.push(`栄養素のうち${emptyCount}項目が空欄です。必要なら入力してください`);
   const p = nutrients.protein_g_per_100g;
   const f = nutrients.fat_g_per_100g;
   const c = nutrients.carbohydrate_g_per_100g;
@@ -9137,6 +9209,7 @@ function cleanItem(raw: any, req: ReqItem) {
   // 価格
   const priceRaw = toNum(raw?.price_per_100g);
   const price = priceRaw !== null && priceRaw > 0 && priceRaw <= 100000 ? Math.round(priceRaw) : null;
+  if (price === null) warnings.push("価格をAIが推定できませんでした。入力してください");
 
   // 旬（12か月すべて・空は通年として扱う）
   const months = [
@@ -9444,6 +9517,30 @@ function isNumericQty(q: string): boolean {
   return /^\d+(\.\d+)?$/.test(n) || /^\d+\/\d+$/.test(n);
 }
 
+// 材料名の末尾の（　）が「下ごしらえ」なら、材料名から外して下ごしらえの欄へ移す。
+//   例：「ハム（千切り）」→ 名前「ハム」・下ごしらえ「千切り」／「しょうが(おろし)」→「しょうが」・「おろし」
+//   「有塩」「白」など、材料の種類を表すものは、名前に残す。
+const KEEP_IN_NAME = /^(有塩|無塩|無調整|国産|白|赤|黒|青|黄|生|乾燥|粉|粉末|顆粒|液体|チューブ|缶|缶詰|瓶|絹|木綿|薄口|濃口|合わせ|赤だし|白だし)$/;
+function splitPrep(name: string, prep: string | null | undefined): { name: string; preparation: string | null } {
+  let base = String(name ?? "").trim();
+  const preps: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    const m = base.match(/^(.+?)\s*[（(]([^）)]*)[）)]\s*$/);
+    if (!m) break;
+    const inner = m[2].trim();
+    if (inner === "") {
+      base = m[1].trim();
+      continue;
+    }
+    if (KEEP_IN_NAME.test(inner.normalize("NFKC"))) break;
+    preps.unshift(inner);
+    base = m[1].trim();
+  }
+  const own = String(prep ?? "").trim();
+  const all = [...preps, ...(own && !preps.includes(own) ? [own] : [])];
+  return { name: base, preparation: all.length > 0 ? all.join("・") : null };
+}
+
 // 工程の本文の角かっこを整える。
 // アプリは [A] のような「英大文字1文字」だけをグループ記号のバッジにする。
 // それ以外の [サラダ油] などは、角かっこを外して中身だけ残す。
@@ -9526,7 +9623,8 @@ function buildSystemPrompt(masterLines: string): string {
 - 工程が全く読み取れず、推定できないときだけ null(cooking_time_estimated は false)。
 
 # 材料
-- ingredient_name は入力に書かれた名前。master_name は下の「材料マスタ」の名前と完全一致するものがあるときだけ入れる。似ているだけ・無いときは null(無理に合わせない)。
+- ingredient_name は「材料の名前だけ」。切り方・下ごしらえ・状態は、名前に含めず、かっこにも入れず、preparation に入れる(例:原文「ハム(千切り)」→ ingredient_name="ハム"・preparation="千切り"、「しょうが(おろし)」→ "しょうが"・"おろし"、「玉ねぎ(みじん切り)」→ "玉ねぎ"・"みじん切り")。
+- master_name は下の「材料マスタ」の名前と完全一致するものがあるときだけ入れる。似ているだけ・無いときは null(無理に合わせない)。
 - quantity は半角数字だけの文字列にする(例:"2" "0.5" "1/2")。「1と1/2」は "1.5"、「2〜3」は中間の "2.5" にして warnings に書く。
 - 「少々」「適量」「適宜」「ひとつまみ」はそのまま quantity に入れ、unit は空文字。
 - unit は単位だけ(例:"g" "大さじ" "小さじ" "個" "ml")。「大さじ1」は quantity="1", unit="大さじ"。マスタに該当材料があるときは、その材料の単位の中から選ぶ。合う単位が無いときは書かれたままの単位にする。
@@ -9718,13 +9816,14 @@ Deno.serve(async (req) => {
   const ingredients = (Array.isArray(parsed.ingredients) ? parsed.ingredients : []).map(
     // deno-lint-ignore no-explicit-any
     (ing: any, i: number) => {
-      const name = String(ing.ingredient_name ?? "").trim();
+      const split = splitPrep(ing.ingredient_name, ing.preparation);
+      const name = split.name;
       const quantity = String(ing.quantity ?? "").normalize("NFKC").trim();
       const unit = normUnit(String(ing.unit ?? ""));
 
       // マスタ照合:AIが選んだ名前 → 無ければ材料名そのもの
       let master: MasterRow | undefined;
-      if (ing.master_name) master = byName.get(norm(String(ing.master_name)));
+      if (ing.master_name) master = byName.get(norm(splitPrep(ing.master_name, null).name));
       if (!master && name) master = byName.get(norm(name));
 
       const availableUnits = master
@@ -9751,7 +9850,7 @@ Deno.serve(async (req) => {
         ingredient_master_id: master ? master.id : null,
         quantity,
         unit,
-        preparation: ing.preparation ? String(ing.preparation) : null,
+        preparation: split.preparation,
         step_number: stepNo,
         group_label: group,
         status,

@@ -1,5 +1,6 @@
 // src/types/recipe.ts（ファイル全体。これで丸ごと置き換えてください）
-// 変更点：Ingredient型に step_id・group_label、Step型に tip を追加（12_ingredients_by_step.sql に対応）
+// 今回の変更：Recipe型に planned_servings（献立で何人前つくるか）を追加（13_servings_migration.sql に対応）
+// 前回の変更点：Ingredient型に step_id・group_label、Step型に tip を追加（12_ingredients_by_step.sql に対応）
 // （以前の変更点：Recipe型に plan_confirmed を追加）
 // ファイル: src/types/recipe.ts
 // レシピ関連の型定義
@@ -25,6 +26,7 @@ export type Recipe = {
   plan_confirmed: boolean             // ★追加：献立に確定済み（is_planned が true のときだけ意味を持つ）
   planned_by: string | null
   planned_at: string | null
+  planned_servings: number | null    // 献立で何人前つくるか（献立に入れたときに初期値が入る）
   registration_method: string | null
   created_by: string | null
   updated_by: string | null

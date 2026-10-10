@@ -1,9 +1,9 @@
-
 // src/components/ShoppingAddSheet.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：材料マスタの単位表（ingredient_units）も読み込み、単位違いの材料を基準単位にそろえて合算する
+// 今回の変更：人数は、献立のレシピごとの「何人前つくるか」（RecipeInfo.planned）で計算する（画面全体の人数設定はなくした）
+// 前回の変更：材料マスタの単位表（ingredient_units）も読み込み、単位違いの材料を基準単位にそろえて合算する
 // 「買い物リストに追加」の確認画面（全画面）
 //   確定した献立の材料を合計して一覧表示 → 選択／削除／数量変更 → 「確定して買い物リストへ追加」
-//   ・人数は、献立画面の人数設定（○人前）で分量を計算
+//   ・人数は、献立画面でレシピごとに決めた「○人前」で分量を計算
 //   ・すでに買い物リストにある材料は、最初は選択オフ（追加すると数量が足されます）
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../supabaseClient'
@@ -21,14 +21,13 @@ type SheetItem = AggItem & {
 }
 
 type Props = {
-  recipes: RecipeInfo[] // 確定している料理
-  servings: number // 何人前ぶん買うか
+  recipes: RecipeInfo[] // 確定している料理（planned＝何人前つくるか）
   userId: string
   onClose: () => void
   onAdded: (count: number) => void
 }
 
-export default function ShoppingAddSheet({ recipes, servings, userId, onClose, onAdded }: Props) {
+export default function ShoppingAddSheet({ recipes, userId, onClose, onAdded }: Props) {
   const [items, setItems] = useState<SheetItem[]>([])
   const [order, setOrder] = useState<string[]>(normalizeCategoryOrder(null))
   const [loading, setLoading] = useState(true)
@@ -103,7 +102,7 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
           }
         })
 
-        const agg = aggregateIngredients(raws, recipes, servings)
+        const agg = aggregateIngredients(raws, recipes)
         if (cancelled) return
         setOrder(catOrder)
         setItems(
@@ -181,7 +180,7 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-base font-bold text-gray-900">🛒 買い物リストに追加</h2>
           <p className="truncate text-[11px] text-gray-400">
-            確定 {recipes.length}品 ／ {servings}人前ぶん
+            確定 {recipes.length}品（献立で決めた、料理ごとの人数で計算）
           </p>
         </div>
         <button

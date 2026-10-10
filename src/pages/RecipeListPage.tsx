@@ -1,12 +1,13 @@
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：検索ボックスの右に、レシピ取り込み（テキスト・写真）へ進む「＋」ボタンを追加（それ以外は前と同じ）
+// 今回の変更：カロリー・値段は「1人前」で固定表示（人数切替をなくした）。献立に追加したときは、設定画面の「人数の初期値」を planned_servings に入れる
+// 前回の変更：検索ボックスの右に、レシピ取り込み（テキスト・写真）へ進む「＋」ボタンを追加（それ以外は前と同じ）
 // 今回の変更：リスト表示のスワイプを「右スワイプ」で献立候補に追加／献立から外す に変更（これまでは左スワイプ）
 // 前提：recipe_nutrition ビュー（01）と、recipes.plan_confirmed 列（09）を作成済みであること
 // 機能：
 //  ・検索ボックスの右横に、写真／リスト切替
 //  ・ジャンル（すべて・和食・洋食・中華・エスニック・その他）を1行、サブカテゴリ（6分類）を1行
 //  ・リスト表示：カードを右へスワイプ →「献立候補」に追加／献立から外す（離すと確定）
-//  ・値は、右上の人数（共通設定）あたりで表示。「－ 2人前 ＋」で変更（詳細・献立画面と共通）
+//  ・カロリー・値段は、いつも1人前で表示
 //  ・写真表示：サムネ右上の＋ボタンで 候補に追加／外す
 //  ・追加／解除のあとに「元に戻す」付きのメッセージを数秒表示
 //  ・カードのバッジ：「候補」「確定」で献立の状態を表示（確定・作ったは献立画面で行う）
@@ -19,8 +20,7 @@ import type { IngredientMaster } from '../types/ingredient'
 import { NUTRIENT_INFO_LIST, getNutrientInfo } from '../data/nutrientInfo'
 import SwipeRow from '../components/SwipeRow'
 import type { SwipeAction } from '../components/SwipeRow'
-import ServingsStepper from '../components/ServingsStepper'
-import { useServings } from '../lib/useServings'
+import { defaultPlanServingsFor } from '../lib/household'
 
 // 一覧で使う項目だけ抜き出す
 type Recipe = Pick<
@@ -165,11 +165,6 @@ function fmtVal(value: number | null, unit: string): string {
   return `${roundSmart(value)}${unit}`
 }
 
-// ビューの値は「1人前あたり」。表示する人数ぶんに掛ける
-function nvN(r: RecipeRow, col: string, servings: number): number | null {
-  const v = nv(r, col)
-  return v == null ? null : v * servings
-}
 
 // 献立の状態：候補／確定／なし
 function planLabel(r: Pick<Recipe, 'is_planned' | 'plan_confirmed'>): '確定' | '候補' | null {
@@ -188,7 +183,6 @@ export default function RecipeListPage() {
   const [error, setError] = useState<string | null>(null)
   const [nutritionNotice, setNutritionNotice] = useState<string | null>(null)
   const [toast, setToast] = useState<Toast | null>(null)
-  const [servings, setServings] = useServings() // 何人前で表示するか（共通設定）
 
   const [keyword, setKeyword] = useState('')
   const [genreFilter, setGenreFilter] = useState<GenreFilter>('すべて')
@@ -268,6 +262,8 @@ export default function RecipeListPage() {
   ): Promise<boolean> => {
     const prev = recipes.find((r) => r.id === id)
     setRecipes((list) => list.map((r) => (r.id === id ? { ...r, ...state } : r)))
+    // 献立に入れるときは「何人前つくるか」の初期値（設定画面）を入れる。外すときは空にする
+    const plannedServings = state.is_planned ? await defaultPlanServingsFor(session.user.id) : null
     const { data, error: updError } = await supabase
       .from('recipes')
       .update({
@@ -275,6 +271,7 @@ export default function RecipeListPage() {
         plan_confirmed: state.plan_confirmed,
         planned_by: state.is_planned ? session.user.id : null,
         planned_at: state.is_planned ? new Date().toISOString() : null,
+        planned_servings: plannedServings,
       })
       .eq('id', id)
       .select('id')
@@ -496,7 +493,7 @@ export default function RecipeListPage() {
           <span className="min-w-0 truncate text-[10px] text-gray-400">
             {viewMode === 'list' ? '右スワイプで献立候補に追加 →' : '右上の＋で献立候補に追加'}
           </span>
-          <ServingsStepper value={servings} onChange={setServings} />
+          <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-600">1人前</span>
         </div>
       </header>
 
@@ -516,7 +513,6 @@ export default function RecipeListPage() {
                   recipe={r}
                   imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
                   sortNutrient={sortNutrientInfo}
-                  servings={servings}
                   onTogglePlanned={() => togglePlanned(r)}
                 />
               ))}
@@ -537,7 +533,6 @@ export default function RecipeListPage() {
                     recipe={r}
                     imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
                     sortNutrient={sortNutrientInfo}
-                    servings={servings}
                   />
                 </SwipeRow>
               ))}
@@ -592,18 +587,16 @@ function PhotoCard({
   recipe: r,
   imageUrl,
   sortNutrient,
-  servings,
   onTogglePlanned,
 }: {
   recipe: RecipeRow
   imageUrl?: string
   sortNutrient: SortNutrientInfo
-  servings: number
   onTogglePlanned: () => void
 }) {
   const title = r.source_name ? `${r.dish_name} / ${r.source_name}` : r.dish_name
-  const kcal = nvN(r, 'calorie_per_serving', servings)
-  const price = nvN(r, 'price_per_serving', servings)
+  const kcal = nv(r, 'calorie_per_serving')
+  const price = nv(r, 'price_per_serving')
   const unresolved = unresolvedCount(r)
   const label = planLabel(r)
 
@@ -634,7 +627,7 @@ function PhotoCard({
         <p className="mt-1.5 line-clamp-2 text-[13px] font-bold leading-snug text-gray-900">{title}</p>
         <p className="mt-0.5 text-[11px] text-gray-500">
           {sortNutrient
-            ? `${sortNutrient.label} ${fmtVal(nvN(r, sortNutrient.col, servings), sortNutrient.unit)}`
+            ? `${sortNutrient.label} ${fmtVal(nv(r, sortNutrient.col), sortNutrient.unit)}`
             : fmtVal(kcal, 'kcal')}
           {' ・ '}
           {fmtVal(price, '円')}
@@ -663,16 +656,14 @@ function ListCard({
   recipe: r,
   imageUrl,
   sortNutrient,
-  servings,
 }: {
   recipe: RecipeRow
   imageUrl?: string
   sortNutrient: SortNutrientInfo
-  servings: number
 }) {
   const genre = genreOf(r)
-  const kcal = nvN(r, 'calorie_per_serving', servings)
-  const price = nvN(r, 'price_per_serving', servings)
+  const kcal = nv(r, 'calorie_per_serving')
+  const price = nv(r, 'price_per_serving')
   const unresolved = unresolvedCount(r)
 
   return (
@@ -703,7 +694,7 @@ function ListCard({
           <div className="flex items-baseline justify-end gap-3 text-sm font-semibold">
             {sortNutrient ? (
               <span className="text-amber-600">
-                {sortNutrient.label} {fmtVal(nvN(r, sortNutrient.col, servings), sortNutrient.unit)}
+                {sortNutrient.label} {fmtVal(nv(r, sortNutrient.col), sortNutrient.unit)}
               </span>
             ) : (
               <span className="text-gray-700">{fmtVal(kcal, 'kcal')}</span>

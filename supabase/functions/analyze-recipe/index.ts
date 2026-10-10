@@ -3,7 +3,8 @@
 // 必要なSecrets: GEMINI_MODEL(モデル名。全員共通)
 // APIキーは「呼んだ人」ごとに user_gemini_keys テーブルから読む(各自が自分のキーを登録)。
 // SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY は Supabase が自動で渡す。
-// 今回の変更：調理時間が書かれていないときは、材料と工程からAIが推定する(cooking_time_estimated=true で返す)
+// 今回の変更：何人前か書かれていないときは、材料の分量からAIが推定する(servings_estimated=true で返す)
+// 前回の変更：調理時間が書かれていないときは、材料と工程からAIが推定する(cooking_time_estimated=true で返す)
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
@@ -106,6 +107,7 @@ const responseSchema = {
     genre: { type: "STRING", enum: [...GENRES] },
     category: { type: "STRING", enum: [...CATEGORIES] },
     servings: { type: "INTEGER" },
+    servings_estimated: { type: "BOOLEAN" },
     cooking_time_minutes: { type: "INTEGER", nullable: true },
     cooking_time_estimated: { type: "BOOLEAN" },
     steps: {
@@ -158,7 +160,8 @@ function buildSystemPrompt(masterLines: string): string {
 - 入力に書かれていない情報を作らない(調理時間だけは、下の「調理時間」のとおり推定してよい)。読み取れない・書かれていない項目は null か空にし、warnings に理由を書く。
 - 文章は原文の言葉をできるだけそのまま使う。言い換えたり、材料名を勝手に詳しくしたりしない(例:原文が「油」なら「油」のまま。「サラダ油」にしない)。
 - dish_name は料理名のみ(「簡単!」などの装飾は除く)。
-- servings は入力に書かれた人数(○人前・○人分)をそのまま整数で。換算しない。書かれていなければ 2 にして warnings に書く。
+- servings は、この分量が何人前か(整数)。入力に「○人前」「○人分」と書かれていれば、その値をそのまま入れ(換算しない)、servings_estimated は false。
+- 書かれていなければ、材料の分量から、日本の家庭料理の一般的な1人前の量をもとに推定し(例:肉・魚が200〜300gなら2人前、ご飯1合なら2人前、麺1玉なら1人前)、servings_estimated を true にする。推定した旨は warnings に書かなくてよい。
 - genre は ${GENRES.join(" / ")} から1つ。category は ${CATEGORIES.join(" / ")} から1つ。
 - source_name は、投稿者・著者・店名など作った人が分かるときだけ。分からなければ null。
 
@@ -424,6 +427,12 @@ Deno.serve(async (req) => {
       ? Math.round(timeRaw)
       : null;
   const cookingEstimated = cookingTime !== null && parsed.cooking_time_estimated === true;
+  const servingsOk = Number.isInteger(parsed.servings) && parsed.servings > 0 && parsed.servings <= 20;
+  const servingsEstimated = !servingsOk || parsed.servings_estimated === true;
+  const servings = servingsOk ? parsed.servings : 2;
+  if (servingsEstimated) {
+    warnings.push(`何人前(${servings}人前)は、AIが材料の分量から推定した目安です。実際に合わせて直してください`);
+  }
   if (cookingEstimated) {
     warnings.push(`調理時間(約${cookingTime}分)は、AIが材料と工程から推定した目安です。実際に合わせて直してください`);
   }
@@ -433,7 +442,8 @@ Deno.serve(async (req) => {
     source_name: parsed.source_name ? String(parsed.source_name).trim() : null,
     genre: (GENRES as readonly string[]).includes(parsed.genre) ? parsed.genre : "その他",
     category: (CATEGORIES as readonly string[]).includes(parsed.category) ? parsed.category : "主菜",
-    servings: Number.isInteger(parsed.servings) && parsed.servings > 0 ? parsed.servings : 2,
+    servings,
+    servings_estimated: servingsEstimated,
     cooking_time_minutes: cookingTime,
     cooking_time_estimated: cookingEstimated,
     registration_method: "ai",

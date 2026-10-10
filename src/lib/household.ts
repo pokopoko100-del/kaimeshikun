@@ -1,4 +1,5 @@
-// src/lib/household.ts（新規作成）
+// src/lib/household.ts（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：献立に追加したときの人数の初期値（households.default_plan_servings）の読み書きを追加
 // 世帯（家族グループ）まわりのDB操作：世帯ID・買い物リストのID・カテゴリ順の読み書き
 import { supabase } from '../supabaseClient'
 import { normalizeCategoryOrder } from './categoryOrder'
@@ -67,4 +68,50 @@ export async function getOrCreateShoppingListId(householdId: string, userId: str
     .single()
   if (error) throw error
   return data.id as string
+}
+
+// ---------- 献立に追加したときの人数の初期値（設定画面で変える。家族で共通） ----------
+export const DEFAULT_PLAN_SERVINGS = 2
+export const MIN_PLAN_SERVINGS = 1
+export const MAX_PLAN_SERVINGS = 20
+
+let planCache: { householdId: string; value: number } | null = null
+
+export async function fetchDefaultPlanServings(householdId: string): Promise<number> {
+  if (planCache && planCache.householdId === householdId) return planCache.value
+  const { data, error } = await supabase
+    .from('households')
+    .select('default_plan_servings')
+    .eq('id', householdId)
+    .maybeSingle()
+  if (error) {
+    // 13のSQLが未実行などで読めないときは、初期値を使う
+    console.error(error)
+    return DEFAULT_PLAN_SERVINGS
+  }
+  const v = Number((data as { default_plan_servings?: unknown } | null)?.default_plan_servings)
+  const value = Number.isInteger(v) && v >= MIN_PLAN_SERVINGS && v <= MAX_PLAN_SERVINGS ? v : DEFAULT_PLAN_SERVINGS
+  planCache = { householdId, value }
+  return value
+}
+
+export async function saveDefaultPlanServings(householdId: string, value: number): Promise<void> {
+  const { data, error } = await supabase
+    .from('households')
+    .update({ default_plan_servings: value })
+    .eq('id', householdId)
+    .select('id')
+  if (error) throw error
+  if (!data || data.length === 0) throw new Error('保存できませんでした（権限を確認してください）')
+  planCache = { householdId, value }
+}
+
+// ログイン中のユーザーの「献立に追加したときの人数」の初期値
+export async function defaultPlanServingsFor(userId: string): Promise<number> {
+  try {
+    return await fetchDefaultPlanServings(await getHouseholdId(userId))
+  } catch (e) {
+    console.error(e)
+    return DEFAULT_PLAN_SERVINGS
+  }
 }

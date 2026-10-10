@@ -1,6 +1,6 @@
-
 // src/lib/shoppingAggregate.ts（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：材料の「複数単位」対応（ingredient_units）
+// 今回の変更：レシピごとに「何人前つくるか」（献立の planned_servings）で分量を計算できるようにした（RecipeInfo.planned）
+// 前回の変更：材料の「複数単位」対応（ingredient_units）
 //   ・材料マスタに登録された単位（大さじ・小さじ・個・枚・g…）なら、どの単位どうしでも換算して合算できる
 //   ・合算した結果は、その材料の「基準単位」（ingredient_units.is_default）で表示する
 //   ・単位が全部同じときは、これまでどおりそのまま合算（単位は変えない）
@@ -33,7 +33,8 @@ export type RawIngredient = {
   } | null
 }
 
-export type RecipeInfo = { id: string; dish_name: string; servings: number }
+// servings＝レシピの標準の人前（分量の基準）／planned＝何人前つくるか（無ければ aggregateIngredients の servings）
+export type RecipeInfo = { id: string; dish_name: string; servings: number; planned?: number | null }
 
 export type AggItem = {
   key: string // 画面内で行を区別するためのキー
@@ -196,7 +197,7 @@ function buildItems(g: Group): AggItem[] {
 export function aggregateIngredients(
   raws: RawIngredient[],
   recipes: RecipeInfo[],
-  servings: number,
+  servings?: number,
 ): AggItem[] {
   const recipeMap = new Map(recipes.map((r) => [r.id, r]))
   const groups = new Map<string, Group>()
@@ -204,7 +205,8 @@ export function aggregateIngredients(
   for (const raw of raws) {
     const recipe = recipeMap.get(raw.recipe_id)
     if (!recipe) continue
-    const factor = recipe.servings > 0 ? servings / recipe.servings : 1
+    const want = recipe.planned ?? servings ?? recipe.servings // 何人前つくるか
+    const factor = recipe.servings > 0 ? want / recipe.servings : 1
     const itemKey = itemKeyOf(raw.ingredient_master_id, raw.ingredient_name)
 
     let g = groups.get(itemKey)

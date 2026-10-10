@@ -1,4 +1,8 @@
-// src/lib/ingredientRegister.ts（新規作成）
+// src/lib/ingredientRegister.ts（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：材料ページからの追加・編集でも使えるようにした
+//   ・RegItem に、既存材料のID（masterId）・銘柄・いつもの商品・購入店・メモ・データ出典を追加
+//   ・RegUnit に、既存の単位のID（id）と、gの行（fixed：重さ1g固定）を追加
+//   ・名前の重複チェックは、編集中の材料自身を除く
 // レシピ取り込みの「材料の登録」の共通部品
 //   ・AIが読み取ったレシピに、材料マスタに無い材料（や、マスタに無い単位）があるとき、
 //     先に材料マスタへ登録する。栄養素・カロリー・価格・旬・単位（1単位が何gか）は、AIが推定する
@@ -48,7 +52,9 @@ export function emptyNutrients(): NutrientForm {
 export const CATEGORY_OPTIONS = DEFAULT_CATEGORY_ORDER
 
 // ---------- 型 ----------
-export type RegUnit = { key: string; unit: string; weight: string; isDefault: boolean }
+// id：編集のとき、すでにDBにある単位の行のID（名前を変えたときも、同じ行として更新するため）
+// fixed：gの行（重さは1g固定。名前・重さを直したり、削除したりできない。基準にはできる）
+export type RegUnit = { key: string; unit: string; weight: string; isDefault: boolean; id?: string; fixed?: boolean }
 
 // 新しく登録する材料
 export type RegItem = {
@@ -66,6 +72,12 @@ export type RegItem = {
   nutrients: NutrientForm
   warnings: string[]
   aiOk: boolean
+  masterId: string | null // 編集中の既存材料のID（新しく登録する材料は null）
+  brand: string // 銘柄（調味料など）
+  product: string // いつもの商品名
+  store: string // 購入店
+  note: string // メモ
+  source: string // データ出典（standard_table / label / ai_estimate）
 }
 
 // すでにある材料に、単位を1つ足す
@@ -116,6 +128,12 @@ export function buildPlan(draft: Draft, masters: MasterOption[]): RegisterPlan {
           nutrients: emptyNutrients(),
           warnings: [],
           aiOk: false,
+          masterId: null,
+          brand: '',
+          product: '',
+          store: '',
+          note: 'レシピ取り込み時にAIが推定した値',
+          source: 'ai_estimate',
         }
         items.set(match, it)
       }
@@ -251,23 +269,33 @@ export function mergeAnalysis(plan: RegisterPlan, a: IngredientAnalysis): Regist
 }
 
 // ---------- 入力のチェック ----------
-function parseNum(s: string): number | null {
+export function parseNum(s: string): number | null {
   const t = s.normalize('NFKC').replace(/,/g, '').trim()
   if (t === '') return null
   const n = Number(t)
   return Number.isFinite(n) ? n : NaN
 }
 
-// 単位の表を、保存できる形に整える（空の行・gは除く。基準の単位は必ず1つ）
-export function normalizeUnits(units: RegUnit[]): { unit: string; weight: number; isDefault: boolean }[] {
+// 単位の表を、保存できる形に整える（空の行・重複は除く。基準の単位は必ず1つ）
+//   ・gの行（fixed）は、重さ1gで残す。fixed でない「g」の行は、これまでどおり除く（gは常に1gのため）
+//   ・id は、編集のときの、既存の行のID
+export type NormUnit = { id?: string; unit: string; weight: number; isDefault: boolean }
+
+export function normalizeUnits(units: RegUnit[]): NormUnit[] {
   const seen = new Set<string>()
-  const out: { unit: string; weight: number; isDefault: boolean }[] = []
+  const out: NormUnit[] = []
   for (const u of units) {
+    if (u.fixed) {
+      if (seen.has('g')) continue
+      seen.add('g')
+      out.push({ id: u.id, unit: 'g', weight: 1, isDefault: u.isDefault })
+      continue
+    }
     const name = normUnit(u.unit)
     const w = parseNum(u.weight)
     if (!name || name === 'g' || seen.has(name) || w === null || Number.isNaN(w) || w <= 0) continue
     seen.add(name)
-    out.push({ unit: name, weight: w, isDefault: u.isDefault })
+    out.push({ id: u.id, unit: name, weight: w, isDefault: u.isDefault })
   }
   let found = false
   for (const u of out) {
@@ -279,7 +307,7 @@ export function normalizeUnits(units: RegUnit[]): { unit: string; weight: number
 }
 
 export function validatePlan(plan: RegisterPlan, masters: MasterOption[]): string | null {
-  const existing = new Set(masters.map((m) => normName(m.name)))
+  const existing = new Map(masters.map((m) => [normName(m.name), m.id]))
   const used = new Set<string>()
 
   for (const it of plan.items) {
@@ -287,8 +315,11 @@ export function validatePlan(plan: RegisterPlan, masters: MasterOption[]): strin
     const name = it.name.trim()
     if (!name) return '材料名が空の材料があります'
     const n = normName(name)
-    if (existing.has(n)) {
-      return `「${name}」は、材料マスタにすでにあります。「既存の材料にまとめる」で選んでください`
+    // 編集のときは、自分自身と同じ名前でも構わない（ほかの材料と同じ名前だけを、重複とする）
+    if (existing.has(n) && existing.get(n) !== it.masterId) {
+      return it.masterId
+        ? `「${name}」は、材料マスタにほかの材料としてすでにあります。名前を変えてください`
+        : `「${name}」は、材料マスタにすでにあります。「既存の材料にまとめる」で選んでください`
     }
     if (used.has(n)) return `「${name}」が2つあります。名前を変えるか、片方のチェックを外してください`
     used.add(n)
@@ -300,6 +331,10 @@ export function validatePlan(plan: RegisterPlan, masters: MasterOption[]): strin
 
     const seenUnits = new Set<string>()
     for (const u of it.units) {
+      if (u.fixed) {
+        seenUnits.add('g')
+        continue
+      }
       const unit = normUnit(u.unit)
       const w = parseNum(u.weight)
       if (!unit && w === null) continue // 何も入っていない行は、無視する
@@ -314,6 +349,11 @@ export function validatePlan(plan: RegisterPlan, masters: MasterOption[]): strin
       const v = parseNum(it.nutrients[n2.col])
       if (v !== null && (Number.isNaN(v) || v < 0)) return `「${name}」の${n2.label}は、0以上の数字で入力してください`
     }
+
+    if (it.brand.length > 100 || it.product.length > 100 || it.store.length > 100) {
+      return `「${name}」の銘柄・いつもの商品・購入店は、100文字までにしてください`
+    }
+    if (it.note.length > 500) return `「${name}」のメモは、500文字までにしてください`
   }
 
   for (const ua of plan.unitAdds) {
@@ -338,7 +378,7 @@ export async function applyPlan(plan: RegisterPlan, userId: string): Promise<{ c
 
   try {
     for (const it of plan.items) {
-      if (!it.checked || it.linkTo) continue
+      if (!it.checked || it.linkTo || it.masterId) continue // 編集中の材料は、ここでは登録しない（saveEdit で保存する）
       const name = it.name.trim()
       const units = normalizeUnits(it.units)
       const def = units.find((u) => u.isDefault)
@@ -350,9 +390,12 @@ export async function applyPlan(plan: RegisterPlan, userId: string): Promise<{ c
         default_unit: def ? def.unit : 'g',
         unit_weight_g: def ? def.weight : 1,
         price_per_100g: parseNum(it.price),
-        nutrition_source: 'ai_estimate',
+        nutrition_source: it.source || 'ai_estimate',
         peak_season_months: it.peakMonths.length > 0 ? it.peakMonths : null,
-        note: 'レシピ取り込み時にAIが推定した値',
+        brand_name: it.brand.trim() || null,
+        usual_product_name: it.product.trim() || null,
+        store_name: it.store.trim() || null,
+        note: it.note.trim() || null,
         created_by: userId,
       }
       for (const n of NUTRIENTS) row[n.col] = parseNum(it.nutrients[n.col])

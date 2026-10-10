@@ -1,9 +1,11 @@
 // src/components/IngredientRegisterStep.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 今回の変更：栄養素を3列で表示（カードの端まで幅を使う）／栄養素の「入力済み／空欄」の数を表示
-// レシピ取り込みの「材料の登録」画面の中身
-//   ・AIが読み取ったレシピに、材料マスタに無い材料（や、マスタに無い単位）があるとき、確認・修正の前に表示する
-//   ・栄養素・カロリー・価格・旬・単位（1単位が何gか）は、AIが推定した値が入っている。直してから登録できる
-//   ・名前が同じ意味の材料がすでにあるときは、「既存の材料にまとめる」で選ぶ（二重に登録しない）
+// 「材料の登録・編集」画面の中身（3つの使い方で共通）
+//   ・variant="recipe"：レシピ取り込み。AIが読み取ったレシピに、材料マスタに無い材料（や単位）があるとき、確認・修正の前に表示する
+//   ・variant="master"：材料ページの「材料を追加」。入力した材料名を、AIで分析して登録する
+//   ・variant="edit"  ：材料ページの「編集」。今の値が入っている。「AIで再取得」で、AIの推定値に置き換えられる
+//   ・栄養素・カロリー・価格・旬・単位（1単位が何gか）は、AIが推定した値が入っている。直してから登録・保存できる
+//   ・名前が同じ意味の材料がすでにあるときは、「既存の材料にまとめる」で選ぶ（レシピ取り込みのみ。二重に登録しない）
 import { useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
@@ -13,6 +15,7 @@ import type { RegisterPlan, RegItem, RegUnit, UnitAddItem } from '../lib/ingredi
 import { CATEGORY_OPTIONS, NUTRIENTS, similarMasters } from '../lib/ingredientRegister'
 
 export type AiStatus = 'analyzing' | 'ready' | 'failed'
+export type RegisterVariant = 'recipe' | 'master' | 'edit'
 
 const INPUT_BASE =
   'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-amber-500 focus:outline-none'
@@ -43,7 +46,10 @@ type Props = {
   saving: boolean
   error: string | null
   onApply: () => void
-  onSkip: () => void
+  onSkip?: () => void // レシピ取り込みのときだけ
+  variant?: RegisterVariant // 既定は recipe
+  onRefetch?: (key: string) => void // 編集のとき：「AIで再取得」
+  refetchingKey?: string | null
 }
 
 export default function IngredientRegisterStep({
@@ -58,6 +64,9 @@ export default function IngredientRegisterStep({
   error,
   onApply,
   onSkip,
+  variant = 'recipe',
+  onRefetch,
+  refetchingKey = null,
 }: Props) {
   // 材料マスタを、カテゴリごとにまとめる（「既存の材料にまとめる」の選択肢）
   const grouped = useMemo(() => {
@@ -79,6 +88,15 @@ export default function IngredientRegisterStep({
   const linkCount = plan.items.filter((i) => i.checked && i.linkTo).length
   const unitCount = plan.unitAdds.filter((u) => u.checked).length
   const total = newCount + linkCount + unitCount
+  const applyLabel =
+    variant === 'edit'
+      ? '保存する'
+      : variant === 'master'
+        ? `登録する（${newCount}件）`
+        : total > 0
+          ? `登録して次へ（${total}件）`
+          : 'このまま次へ'
+  const busyLabel = variant === 'edit' ? '保存中…' : '登録中…'
 
   const errorBox = error && (
     <p className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-600">{error}</p>
@@ -93,16 +111,36 @@ export default function IngredientRegisterStep({
       </datalist>
 
       <div className="mb-3 rounded-xl bg-white p-3 shadow-sm">
-        <h2 className="text-sm font-bold text-gray-900">🥕 材料マスタに無い材料があります</h2>
-        <p className="mt-1 text-xs leading-relaxed text-gray-500">
-          カロリー・費用は、材料マスタの値から計算します。先にここで登録しておくと、このレシピも計算できます。栄養素・価格・旬・単位は、AIが推定した目安です（食品成分表の値とは少し違うことがあります）。内容を確認してから登録してください。
-        </p>
+        {variant === 'recipe' && (
+          <>
+            <h2 className="text-sm font-bold text-gray-900">🥕 材料マスタに無い材料があります</h2>
+            <p className="mt-1 text-xs leading-relaxed text-gray-500">
+              カロリー・費用は、材料マスタの値から計算します。先にここで登録しておくと、このレシピも計算できます。栄養素・価格・旬・単位は、AIが推定した目安です（食品成分表の値とは少し違うことがあります）。内容を確認してから登録してください。
+            </p>
+          </>
+        )}
+        {variant === 'master' && (
+          <>
+            <h2 className="text-sm font-bold text-gray-900">✨ AIが推定した内容を確認してください</h2>
+            <p className="mt-1 text-xs leading-relaxed text-gray-500">
+              栄養素・価格・旬・単位は、AIが推定した目安です（食品成分表の値とは少し違うことがあります）。直してから登録できます。チェックを外した材料は、登録しません。
+            </p>
+          </>
+        )}
+        {variant === 'edit' && (
+          <>
+            <h2 className="text-sm font-bold text-gray-900">✏️ 材料を編集</h2>
+            <p className="mt-1 text-xs leading-relaxed text-gray-500">
+              内容を直して、「保存する」を押してください。「AIで再取得」を押すと、栄養素・価格・旬・単位を、AIの推定値に置き換えられます。
+            </p>
+          </>
+        )}
       </div>
 
       {errorBox}
 
       {/* AIの分析状況 */}
-      {aiStatus === 'analyzing' && (
+      {aiStatus === 'analyzing' && variant !== 'edit' && (
         <div className="mb-3 rounded-xl bg-amber-50 p-4 text-sm text-amber-800">
           <p className="font-bold">✨ AIが、栄養素・価格・単位を分析中です…（10〜30秒ほど）</p>
           <ul className="mt-2 list-disc pl-5 text-xs">
@@ -118,7 +156,7 @@ export default function IngredientRegisterStep({
         </div>
       )}
 
-      {aiStatus === 'failed' && (
+      {aiStatus === 'failed' && variant !== 'edit' && (
         <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-600">
           <p>AIの分析に失敗しました：{aiError}</p>
           {aiErrorCode === 'NO_API_KEY' && (
@@ -142,10 +180,23 @@ export default function IngredientRegisterStep({
           {/* 新しく登録する材料 */}
           {plan.items.length > 0 && (
             <section className="mb-3">
-              <h3 className="mb-2 px-1 text-sm font-bold text-gray-900">新しく登録する材料（{plan.items.length}件）</h3>
+              {variant !== 'edit' && (
+                <h3 className="mb-2 px-1 text-sm font-bold text-gray-900">
+                  {variant === 'master' ? '登録する材料' : '新しく登録する材料'}（{plan.items.length}件）
+                </h3>
+              )}
               <ul className="space-y-3">
                 {plan.items.map((it) => (
-                  <ItemCard key={it.key} it={it} masters={masters} grouped={grouped} onPatch={(p) => patchItem(it.key, p)} />
+                  <ItemCard
+                    key={it.key}
+                    it={it}
+                    masters={masters}
+                    grouped={grouped}
+                    variant={variant}
+                    refetching={refetchingKey === it.key}
+                    onRefetch={onRefetch ? () => onRefetch(it.key) : undefined}
+                    onPatch={(p) => patchItem(it.key, p)}
+                  />
                 ))}
               </ul>
             </section>
@@ -197,19 +248,23 @@ export default function IngredientRegisterStep({
       <button
         type="button"
         onClick={onApply}
-        disabled={saving || aiStatus === 'analyzing'}
-        className="w-full rounded-xl bg-amber-500 py-3.5 text-base font-bold text-white active:opacity-80 disabled:bg-gray-300"
+        disabled={saving || aiStatus === 'analyzing' || refetchingKey !== null || (variant === 'master' && newCount === 0)}
+        className={`w-full rounded-xl bg-amber-500 py-3.5 text-base font-bold text-white active:opacity-80 disabled:bg-gray-300 ${
+          onSkip ? '' : 'mb-6'
+        }`}
       >
-        {saving ? '登録中…' : total > 0 ? `登録して次へ（${total}件）` : 'このまま次へ'}
+        {saving ? busyLabel : applyLabel}
       </button>
-      <button
-        type="button"
-        onClick={onSkip}
-        disabled={saving}
-        className="mb-6 mt-2 w-full rounded-xl border border-gray-300 bg-white py-3 text-sm font-bold text-gray-600 active:bg-gray-50 disabled:opacity-50"
-      >
-        登録せずに進む（これらの材料は「未計算」になります）
-      </button>
+      {onSkip && (
+        <button
+          type="button"
+          onClick={onSkip}
+          disabled={saving}
+          className="mb-6 mt-2 w-full rounded-xl border border-gray-300 bg-white py-3 text-sm font-bold text-gray-600 active:bg-gray-50 disabled:opacity-50"
+        >
+          登録せずに進む（これらの材料は「未計算」になります）
+        </button>
+      )}
     </div>
   )
 }
@@ -219,15 +274,22 @@ function ItemCard({
   it,
   masters,
   grouped,
+  variant,
+  refetching,
+  onRefetch,
   onPatch,
 }: {
   it: RegItem
   masters: MasterOption[]
   grouped: (readonly [string, MasterOption[]])[]
+  variant: RegisterVariant
+  refetching: boolean
+  onRefetch?: () => void
   onPatch: (p: Partial<RegItem>) => void
 }) {
-  const similar = useMemo(() => similarMasters(it.name, masters), [it.name, masters])
-  const linked = it.linkTo !== ''
+  const similar = useMemo(() => (variant === 'recipe' ? similarMasters(it.name, masters) : []), [variant, it.name, masters])
+  const isEdit = variant === 'edit'
+  const linked = variant === 'recipe' && it.linkTo !== ''
   const disabled = !it.checked
   const filledCount = NUTRIENTS.filter((n) => it.nutrients[n.col].trim() !== '').length
 
@@ -249,13 +311,15 @@ function ItemCard({
     <li className={`rounded-xl bg-white p-3 shadow-sm ${disabled ? 'opacity-60' : ''}`}>
       {/* 1行目：登録する／名前 */}
       <div className="flex items-center gap-2">
-        <input
-          type="checkbox"
-          checked={it.checked}
-          onChange={(e) => onPatch({ checked: e.target.checked })}
-          aria-label="この材料を登録する"
-          className="h-4 w-4 shrink-0"
-        />
+        {!isEdit && (
+          <input
+            type="checkbox"
+            checked={it.checked}
+            onChange={(e) => onPatch({ checked: e.target.checked })}
+            aria-label="この材料を登録する"
+            className="h-4 w-4 shrink-0"
+          />
+        )}
         <input
           className={`${INPUT_BASE} min-w-0 flex-1 font-bold`}
           value={it.name}
@@ -263,9 +327,26 @@ function ItemCard({
           onChange={(e) => onPatch({ name: e.target.value })}
         />
       </div>
-      <p className="mt-1 pl-6 text-[11px] text-gray-400">レシピでの使い方：{it.usage || '（分量なし）'}</p>
+      {variant === 'recipe' && (
+        <p className="mt-1 pl-6 text-[11px] text-gray-400">レシピでの使い方：{it.usage || '（分量なし）'}</p>
+      )}
 
-      {/* 既存の材料にまとめる */}
+      {/* 編集：AIで再取得 */}
+      {isEdit && onRefetch && (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={onRefetch}
+            disabled={refetching}
+            className="w-full rounded-lg border border-amber-400 bg-amber-50 py-2 text-sm font-bold text-amber-700 active:bg-amber-100 disabled:opacity-60"
+          >
+            {refetching ? '✨ AIが分析中…（10〜30秒ほど）' : '✨ AIで再取得（栄養素・価格・旬・単位）'}
+          </button>
+        </div>
+      )}
+
+      {/* 既存の材料にまとめる（レシピ取り込みのときだけ） */}
+      {variant === 'recipe' && (
       <div className="mt-2 pl-6">
         <Field label="すでに同じ材料があるときは、ここで選ぶ（二重に登録しません）">
           <select className={INPUT} value={it.linkTo} disabled={disabled} onChange={(e) => onPatch({ linkTo: e.target.value })}>
@@ -296,9 +377,10 @@ function ItemCard({
           </p>
         )}
       </div>
+      )}
 
       {!linked && (
-        <div className={`mt-3 space-y-3 pl-6 ${disabled ? 'pointer-events-none' : ''}`}>
+        <div className={`mt-3 space-y-3 ${variant === 'recipe' ? 'pl-6' : ''} ${disabled || refetching ? 'pointer-events-none' : ''} ${refetching ? 'opacity-50' : ''}`}>
           {it.warnings.length > 0 && (
             <ul className="list-disc space-y-0.5 rounded-lg bg-amber-50 py-2 pl-6 pr-3 text-[11px] leading-relaxed text-amber-800">
               {it.warnings.map((w, i) => (
@@ -327,7 +409,20 @@ function ItemCard({
             <p className="mb-1 text-[11px] font-semibold text-gray-500">単位（1単位が何gか）　● ＝ 基準の単位</p>
             {it.units.length === 0 && <p className="mb-1 text-[11px] text-gray-400">単位なし（gで計算します）</p>}
             <ul className="space-y-1.5">
-              {it.units.map((u) => (
+              {it.units.map((u) => u.fixed ? (
+                <li key={u.key} className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setDefault(u.key)}
+                    aria-label="gを基準にする"
+                    className={`h-9 w-9 shrink-0 rounded-lg border text-base ${u.isDefault ? 'border-amber-500 text-amber-600' : 'border-gray-300 text-gray-300'}`}
+                  >
+                    {u.isDefault ? '●' : '○'}
+                  </button>
+                  <span className="w-20 shrink-0 px-3 text-sm font-medium text-gray-800">g</span>
+                  <span className="min-w-0 flex-1 text-xs text-gray-400">1 ＝ 1 g（固定）</span>
+                </li>
+              ) : (
                 <li key={u.key} className="flex items-center gap-1.5">
                   <button
                     type="button"
@@ -375,8 +470,39 @@ function ItemCard({
             </button>
           </div>
 
+          {/* 銘柄・いつもの商品・購入店・メモ */}
+          <details className={variant === 'recipe' ? '-ml-6' : ''}>
+            <summary className="cursor-pointer text-xs font-semibold text-gray-600">
+              銘柄・いつもの商品・購入店・メモ
+              {(it.brand || it.product || it.store || it.note) && (
+                <span className="ml-1 font-normal text-gray-400">（入力あり）</span>
+              )}
+            </summary>
+            <div className="mt-2 space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="銘柄（調味料など）">
+                  <input className={INPUT} value={it.brand} onChange={(e) => onPatch({ brand: e.target.value })} />
+                </Field>
+                <Field label="購入店">
+                  <input className={INPUT} value={it.store} onChange={(e) => onPatch({ store: e.target.value })} />
+                </Field>
+              </div>
+              <Field label="いつもの商品名">
+                <input className={INPUT} value={it.product} onChange={(e) => onPatch({ product: e.target.value })} />
+              </Field>
+              <Field label="メモ">
+                <textarea
+                  className={INPUT}
+                  rows={2}
+                  value={it.note}
+                  onChange={(e) => onPatch({ note: e.target.value })}
+                />
+              </Field>
+            </div>
+          </details>
+
           {/* 栄養素・旬（左の字下げを打ち消して、カードの幅いっぱいに3列で並べる） */}
-          <details className="-ml-6">
+          <details className={variant === 'recipe' ? '-ml-6' : ''}>
             <summary className="cursor-pointer text-xs font-semibold text-gray-600">
               栄養素（100gあたり）・旬を確認する
               <span className="ml-1 font-normal text-gray-400">

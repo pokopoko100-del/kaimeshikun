@@ -4,6 +4,9 @@
 //   ・保存は、この画面から recipes → steps → ingredients の順に行う（途中で失敗したら、作りかけのレシピを消して元に戻す）
 //   ・「未計算になるか」の判定は、レシピ詳細・サーバー側の関数（recipe_nutrition ビュー）と同じルール
 // 今回の変更：
+//   ・何人前をAIが推定したときのフラグ（servingsEstimated）を追加。人数は1〜20
+//   ・AIの推定（調理時間・人数）の注意は、確認画面の欄の横に出すので、注意の一覧からは外す
+// 前回の変更：
 //   ・材料名の末尾の（　）が下ごしらえのときは、名前から外して「下ごしらえ」欄へ移す（splitPrep。ハム（千切り）→ ハム＋千切り）
 //   ・名前が材料マスタと同じ材料は、自動で結び付ける（relinkByName）
 // 前回の変更：
@@ -51,6 +54,7 @@ export type Draft = {
   genre: string
   category: string
   servings: string
+  servingsEstimated: boolean // AIが推定した人数か（直すと false になる）
   cookingTime: string
   cookingTimeEstimated: boolean // AIが推定した調理時間か（直すと false になる）
   steps: DraftStep[]
@@ -201,6 +205,7 @@ type ServerRecipe = {
   genre: string
   category: string
   servings: number
+  servings_estimated?: boolean
   cooking_time_minutes: number | null
   cooking_time_estimated?: boolean
   steps: ServerStep[]
@@ -208,7 +213,7 @@ type ServerRecipe = {
 }
 
 // 材料の登録（次の画面）で解決するので、確認画面では出さない注意
-const STALE_WARNING = /材料マスタに無い材料が|単位がマスタの単位表に無い材料が/
+const STALE_WARNING = /材料マスタに無い材料が|単位がマスタの単位表に無い材料が|AIが材料と工程から推定した目安|AIが材料の分量から推定した目安/
 
 function toDraft(r: ServerRecipe): Draft {
   // 工程は 1,2,3… に振り直し、材料の「使う工程」も同じ番号に直す
@@ -225,6 +230,7 @@ function toDraft(r: ServerRecipe): Draft {
     genre: r.genre,
     category: r.category,
     servings: String(r.servings ?? 2),
+    servingsEstimated: r.servings_estimated === true,
     cookingTime: hasTime ? String(r.cooking_time_minutes) : '',
     cookingTimeEstimated: hasTime && r.cooking_time_estimated === true,
     steps: sorted.map((s) => ({
@@ -287,7 +293,7 @@ export function validateDraft(d: Draft): string | null {
   if (!d.dishName.trim()) return '料理名を入力してください'
   if (!d.sourceName.trim()) return '参考元を入力してください（例：リュウジ、自作、料理本の名前）'
   const servings = Number(d.servings)
-  if (!Number.isInteger(servings) || servings < 1 || servings > 99) return '人数は1〜99の整数で入力してください'
+  if (!Number.isInteger(servings) || servings < 1 || servings > 20) return '標準の人前は、1〜20の整数で入力してください'
   if (d.cookingTime.trim() !== '') {
     const t = Number(d.cookingTime)
     if (!Number.isInteger(t) || t < 0 || t > 1440) return '調理時間は0以上の整数（分）で入力してください'
