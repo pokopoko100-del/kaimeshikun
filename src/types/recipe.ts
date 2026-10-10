@@ -1,5 +1,6 @@
 // src/types/recipe.ts（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：Recipe型に planned_servings（献立で何人前つくるか）を追加（13_servings_migration.sql に対応）
+// 今回の変更：Recipe型に plan_purchased（確定した料理を買い物リストに追加済み）を追加（14_menu_purchased_migration.sql）
+// 前回の変更：Recipe型に planned_servings（献立で何人前つくるか）を追加（13_servings_migration.sql に対応）
 // 前回の変更点：Ingredient型に step_id・group_label、Step型に tip を追加（12_ingredients_by_step.sql に対応）
 // （以前の変更点：Recipe型に plan_confirmed を追加）
 // ファイル: src/types/recipe.ts
@@ -24,6 +25,7 @@ export type Recipe = {
   image_path: string | null
   is_planned: boolean                 // 献立に入っている（候補 or 確定）
   plan_confirmed: boolean             // ★追加：献立に確定済み（is_planned が true のときだけ意味を持つ）
+  plan_purchased: boolean             // 確定(購入済)：買い物リストに追加済み
   planned_by: string | null
   planned_at: string | null
   planned_servings: number | null    // 献立で何人前つくるか（献立に入れたときに初期値が入る）

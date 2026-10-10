@@ -4,6 +4,13 @@
 // 前提：ingredient_units テーブル（複数単位の対応）を作成済みであること
 // 前提：src/lib/recipePhoto.ts と src/lib/ingredientOrder.ts を置いてあること（今回の追加ファイル）
 // 今回の変更：
+//  ・献立から開いたときは、材料を献立の人数（URLの ?servings=）で表示する
+//  ・ヘッダーに「✏️ 編集」ボタン（/recipes/:id/edit へ）。一番下の「参考元」はなくした（上の参考元が、URLがあればリンクになる）
+//  ・「材料」表で、同じ材料はまとめて合算して表示（単位が違うときは「大さじ1＋50g」のように並べる）
+//  ・分量は 0.333 → 1/3、1.5 → 1と1/2 のように分数で表示（g・ml と 10以上は小数）
+//  ・材料の記号（A・B…）のバッジを青にした（工程番号のオレンジと見分けやすく）
+//  ・献立の状態に「購入済」を追加（14_menu_purchased_migration.sql）。献立から外すときは購入済も解除
+// 前回の変更：
 //  ・カロリー・値段・栄養素は「1人前」で固定表示（人数で変わらない）
 //  ・材料の人数切替は、このレシピの「標準の人前」（recipes.servings）から始まる（共通設定ではなくなった。画面を開き直すと標準に戻る）
 //  ・献立に追加したときは、設定画面の「人数の初期値」を planned_servings に入れる
@@ -24,7 +31,7 @@
 //  ・計算できていない材料には「未計算」マーク（判定は材料マスタの単位表 ingredient_units に合わせてある）
 //  ・分量は「大さじ3」のように、大さじ・小さじは単位を先頭に表示
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useOutletContext, useParams } from 'react-router-dom'
+import { useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../supabaseClient'
 import type { Ingredient, Recipe, Step } from '../types/recipe'
@@ -40,6 +47,7 @@ import { orderByCategory } from '../lib/ingredientOrder'
 import type { OrderedRow } from '../lib/ingredientOrder'
 import { compressForDisplay, replaceRecipePhoto } from '../lib/recipePhoto'
 import { errorText } from '../lib/errorText'
+import { formatNumber, joinAmount, parseAmount, scaledAmount } from '../lib/amount'
 
 // 材料 ＋ 紐付いたマスタの情報（カテゴリ順の並びと、未計算の判定に使う）
 type IngredientRow = Ingredient & {
@@ -64,6 +72,7 @@ type PlanPatch = {
   planned_by: string | null
   planned_at: string | null
   planned_servings: number | null
+  plan_purchased: boolean
 }
 type Toast = { message: string; onUndo: () => void }
 
@@ -99,24 +108,6 @@ function isResolved(ing: IngredientRow): boolean {
 }
 
 // ---------- 表示用ヘルパー ----------
-// 分量の表示：「大さじ」「小さじ」は単位が先頭（大さじ3）、それ以外は数量が先頭（300g・2個）
-function formatAmount(quantity: string | null, unit: string | null): string {
-  const q = quantity ?? ''
-  const u = unit ?? ''
-  if (u === '大さじ' || u === '小さじ') return `${u}${q}`
-  return `${q}${u}`
-}
-
-// 人数に合わせて分量を増減する（"1/2" "2" などの数値だけ。「適量」などはそのまま）
-function scaleQuantity(quantity: string | null, factor: number): string | null {
-  if (quantity == null || factor === 1) return quantity
-  const n = parseQty(quantity)
-  if (n == null) return quantity
-  const v = n * factor
-  const rounded = v >= 100 ? Math.round(v) : v >= 10 ? Math.round(v * 10) / 10 : Math.round(v * 100) / 100
-  return String(rounded)
-}
-
 function roundSmart(value: number): number {
   const abs = Math.abs(value)
   if (abs === 0) return 0
@@ -178,8 +169,72 @@ const MAIN_KEYS = [
 ]
 const INDENT_KEYS = ['sugar_g_per_100g', 'dietary_fiber_g_per_100g'] // 炭水化物の内訳は字下げ
 
+// ---------- 「材料」表：同じ材料をまとめる ----------
+// 同じ材料（材料マスタが同じ、またはマスタ無しで名前が同じ）は1行にまとめ、同じ単位どうしは足す
+type MergedRow = {
+  key: string
+  name: string
+  category: string | null
+  sortOrder: number
+  parts: { qty: number | null; text: string | null; unit: string | null }[]
+  unresolved: boolean
+}
+
+function mergeIngredients(list: IngredientRow[], unresolvedSet: Set<string>): MergedRow[] {
+  const map = new Map<string, MergedRow>()
+  for (const ing of list) {
+    const key = ing.ingredient_master_id ?? `name:${ing.ingredient_name.trim()}`
+    let row = map.get(key)
+    if (!row) {
+      row = {
+        key,
+        name: ing.ingredient_name,
+        category: ing.ingredient_master?.category ?? null,
+        sortOrder: ing.sort_order,
+        parts: [],
+        unresolved: false,
+      }
+      map.set(key, row)
+    }
+    row.sortOrder = Math.min(row.sortOrder, ing.sort_order)
+    if (unresolvedSet.has(ing.id)) row.unresolved = true
+    const unit = ing.unit && ing.unit.trim() !== '' ? ing.unit.trim() : null
+    const qty = parseAmount(ing.quantity)
+    if (qty != null) {
+      const same = row.parts.find((p) => p.qty != null && p.unit === unit)
+      if (same) same.qty = (same.qty as number) + qty
+      else row.parts.push({ qty, text: null, unit })
+    } else if (!isNegligible(ing.quantity) || row.parts.length === 0) {
+      const text = (ing.quantity ?? '').trim()
+      if (!row.parts.some((p) => p.qty == null && p.text === text && p.unit === unit)) {
+        row.parts.push({ qty: null, text, unit })
+      }
+    }
+  }
+  // 数値のある行があれば、「少々」などの行は消す
+  for (const row of map.values()) {
+    if (row.parts.some((p) => p.qty != null)) {
+      row.parts = row.parts.filter((p) => p.qty != null || !isNegligible(p.text))
+    }
+  }
+  return [...map.values()]
+}
+
+function mergedAmount(row: MergedRow, factor: number): string {
+  return row.parts
+    .map((p) => (p.qty != null ? joinAmount(formatNumber(p.qty * factor, p.unit), p.unit) : joinAmount(p.text, p.unit)))
+    .filter((t) => t !== '')
+    .join('＋')
+}
+
 export default function RecipeDetailPage() {
   const { id } = useParams<{ id: string }>()
+  const [searchParams] = useSearchParams()
+  // 献立から開いたときの人数（?servings=3）。無いときは、レシピの標準の人前
+  const planServings = (() => {
+    const n = Number(searchParams.get('servings'))
+    return Number.isInteger(n) && n >= 1 && n <= 20 ? n : null
+  })()
   const navigate = useNavigate()
   const { session } = useOutletContext<{ session: Session }>()
   const photoInput = useRef<HTMLInputElement>(null)
@@ -259,7 +314,7 @@ export default function RecipeDetailPage() {
         return
       }
       setRecipe(recipeResult.data as Recipe)
-      setServings(Math.max(1, (recipeResult.data as Recipe).servings || 1))
+      setServings(planServings ?? Math.max(1, (recipeResult.data as Recipe).servings || 1))
 
       // 材料：マスタ結合つきの取得に失敗したときは、結合なしで取り直す（表示は止めない）
       if (ingredientsResult.error) {
@@ -326,6 +381,7 @@ export default function RecipeDetailPage() {
       planned_by: recipe.planned_by,
       planned_at: recipe.planned_at,
       planned_servings: recipe.planned_servings ?? null,
+      plan_purchased: recipe.plan_purchased ?? false,
     }
     const adding = !recipe.is_planned
     const ok = await writePlan({
@@ -334,6 +390,7 @@ export default function RecipeDetailPage() {
       planned_by: adding ? session.user.id : null,
       planned_at: adding ? new Date().toISOString() : null,
       planned_servings: adding ? await defaultPlanServingsFor(session.user.id) : null,
+      plan_purchased: false,
     })
     if (!ok) return
     setToast({
@@ -402,12 +459,12 @@ export default function RecipeDetailPage() {
   const orderedIngredients = useMemo(
     () =>
       orderByCategory(
-        ingredients,
+        mergeIngredients(ingredients, unresolvedSet),
         categoryOrder,
-        (ing) => ing.ingredient_master?.category,
-        (ing) => ing.sort_order,
+        (row) => row.category,
+        (row) => row.sortOrder,
       ),
-    [ingredients, categoryOrder],
+    [ingredients, categoryOrder, unresolvedSet],
   )
 
   if (loading) {
@@ -439,10 +496,12 @@ export default function RecipeDetailPage() {
   const uncertain = unresolvedCount > 0 || nutritionFailed // 計算に含まれていない材料がある
 
   // 献立の状態：未追加／候補／確定
-  const planState: 'none' | 'candidate' | 'confirmed' = !recipe.is_planned
+  const planState: 'none' | 'candidate' | 'confirmed' | 'purchased' = !recipe.is_planned
     ? 'none'
     : recipe.plan_confirmed
-      ? 'confirmed'
+      ? recipe.plan_purchased
+        ? 'purchased'
+        : 'confirmed'
       : 'candidate'
 
   // 作った履歴（新しい順に10件。「すべて表示」で全件）
@@ -455,11 +514,18 @@ export default function RecipeDetailPage() {
         {/* ①左：戻る ／ 右：追加・履歴（回数つき）・栄養素 */}
         <div className="flex items-center gap-2">
           <button
-            onClick={() => navigate('/recipes')}
-            aria-label="一覧に戻る"
+            onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/recipes'))}
+            aria-label="戻る"
             className="shrink-0 rounded-full bg-gray-100 px-3 py-1.5 text-sm font-semibold text-gray-700 active:bg-gray-200"
           >
             ← 戻る
+          </button>
+          <button
+            onClick={() => navigate(`/recipes/${recipe.id}/edit`)}
+            aria-label="レシピを編集する"
+            className="shrink-0 rounded-full border border-gray-300 bg-white px-2.5 py-1.5 text-xs font-bold text-gray-700 active:bg-gray-100"
+          >
+            ✏️ 編集
           </button>
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
             <button
@@ -483,6 +549,7 @@ export default function RecipeDetailPage() {
               {planState === 'none' && '＋ 追加'}
               {planState === 'candidate' && '✓ 候補'}
               {planState === 'confirmed' && '✓ 確定'}
+              {planState === 'purchased' && '✓ 購入済'}
             </button>
             <button
               onClick={() => setSheet('history')}
@@ -502,7 +569,14 @@ export default function RecipeDetailPage() {
         {/* ②料理名 ＋ 下に小さく：参照元・時間・カロリー・費用（選んだ人数ぶん） */}
         <h1 className="mt-1.5 truncate text-lg font-bold leading-tight text-gray-900">{recipe.dish_name}</h1>
         <p className="mt-0.5 flex items-center gap-1 text-[11px] leading-tight text-gray-500">
-          {recipe.source_name && <span className="min-w-0 truncate">{recipe.source_name}</span>}
+          {recipe.source_name &&
+            (recipe.source_url ? (
+              <a href={recipe.source_url} target="_blank" rel="noreferrer" className="min-w-0 truncate text-amber-700 underline">
+                {recipe.source_name}
+              </a>
+            ) : (
+              <span className="min-w-0 truncate">{recipe.source_name}</span>
+            ))}
           <span className="shrink-0 whitespace-nowrap">
             {recipe.source_name ? '・' : ''}⏱ {recipe.cooking_time_minutes != null ? `${recipe.cooking_time_minutes}分` : '―'}
             {' ・ '}
@@ -558,7 +632,9 @@ export default function RecipeDetailPage() {
           <div className="mb-2 flex items-center justify-between gap-2">
             <h2 className="font-semibold text-gray-800">
               材料
-              {servings !== recipe.servings ? (
+              {planServings != null && servings === planServings && servings !== recipe.servings ? (
+                <span className="ml-2 text-xs font-normal text-gray-400">献立の人数（標準{recipe.servings}人前）</span>
+              ) : servings !== recipe.servings ? (
                 <button
                   type="button"
                   onClick={() => setServings(recipe.servings)}
@@ -576,7 +652,7 @@ export default function RecipeDetailPage() {
             <p className="text-sm text-gray-400">材料情報はありません。</p>
           ) : (
             <div className="rounded-xl bg-white px-4 py-1 shadow-sm">
-              <IngredientTable rows={orderedIngredients} factor={factor} unresolvedSet={unresolvedSet} />
+              <IngredientTable rows={orderedIngredients} factor={factor} />
             </div>
           )}
         </section>
@@ -601,17 +677,6 @@ export default function RecipeDetailPage() {
           )}
         </section>
 
-        {/* 参考元情報 */}
-        {(recipe.source_name || recipe.source_url) && (
-          <section className="mt-6 text-xs text-gray-400">
-            <p>参考元: {recipe.source_name}</p>
-            {recipe.source_url && (
-              <a href={recipe.source_url} target="_blank" rel="noreferrer" className="underline break-all">
-                {recipe.source_url}
-              </a>
-            )}
-          </section>
-        )}
       </div>
 
       {/* 履歴（作った日付。新しい順） */}
@@ -763,34 +828,26 @@ function NutrientLine({ label, value, indent }: { label: string; value: string; 
 }
 
 // ---------- 材料表（買い物リストのカテゴリ順） ----------
-// カテゴリ名は出さない。1つ前の行とカテゴリが違う行の上の線だけ、濃くする。グループ記号・下ごしらえ（括弧書き）も出さない
-function IngredientTable({
-  rows,
-  factor,
-  unresolvedSet,
-}: {
-  rows: OrderedRow<IngredientRow>[]
-  factor: number
-  unresolvedSet: Set<string>
-}) {
+// カテゴリ名は出さない。1つ前の行とカテゴリが違う行の上の線だけ、濃くする。同じ材料はまとめて合算して表示
+function IngredientTable({ rows, factor }: { rows: OrderedRow<MergedRow>[]; factor: number }) {
   return (
     <ul>
-      {rows.map(({ item: ing, startsGroup }, i) => (
+      {rows.map(({ item: row, startsGroup }, i) => (
         <li
-          key={ing.id}
+          key={row.key}
           className={`flex justify-between gap-2 py-1.5 text-sm ${
             i === 0 ? '' : startsGroup ? 'border-t border-gray-400' : 'border-t border-gray-100'
           }`}
         >
           <span className="min-w-0 text-gray-700">
-            {ing.ingredient_name}
-            {unresolvedSet.has(ing.id) && (
+            {row.name}
+            {row.unresolved && (
               <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
                 未計算
               </span>
             )}
           </span>
-          <span className="shrink-0 text-gray-500">{formatAmount(scaleQuantity(ing.quantity, factor), ing.unit)}</span>
+          <span className="shrink-0 text-right text-gray-500">{mergedAmount(row, factor)}</span>
         </li>
       ))}
     </ul>
@@ -798,11 +855,11 @@ function IngredientTable({
 }
 
 // ---------- 工程ごとの表示部品 ----------
-// グループ記号（A・B…）のオレンジの丸バッジ
+// グループ記号（A・B…）の青い丸バッジ（工程番号のオレンジと見分けやすく）
 function GroupBadge({ label, small }: { label: string; small?: boolean }) {
   return (
     <span
-      className={`inline-flex shrink-0 items-center justify-center rounded-full bg-orange-500 font-bold text-white ${
+      className={`inline-flex shrink-0 items-center justify-center rounded-full bg-sky-600 font-bold text-white ${
         small ? 'mx-0.5 h-4 w-4 align-middle text-[10px]' : 'h-5 w-5 text-[11px]'
       }`}
     >
@@ -844,7 +901,7 @@ function IngredientLine({
           </span>
         )}
       </span>
-      <span className="shrink-0 text-gray-500">{formatAmount(scaleQuantity(ing.quantity, factor), ing.unit)}</span>
+      <span className="shrink-0 text-gray-500">{scaledAmount(ing.quantity, ing.unit, factor)}</span>
     </li>
   )
 }
@@ -864,11 +921,11 @@ function StepIngredients({
     <div>
       {blocks.map((b, i) =>
         b.label ? (
-          <div key={i} className="my-1 flex items-start gap-2 rounded-lg bg-orange-50 px-2 py-1">
+          <div key={i} className="my-1 flex items-start gap-2 rounded-lg bg-sky-50 px-2 py-1">
             <span className="mt-1">
               <GroupBadge label={b.label} />
             </span>
-            <ul className="min-w-0 flex-1 divide-y divide-orange-100">
+            <ul className="min-w-0 flex-1 divide-y divide-sky-100">
               {b.items.map((ing) => (
                 <IngredientLine key={ing.id} ing={ing} factor={factor} unresolved={unresolvedSet.has(ing.id)} />
               ))}

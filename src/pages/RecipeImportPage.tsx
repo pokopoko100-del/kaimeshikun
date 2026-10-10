@@ -1,5 +1,6 @@
 // src/pages/RecipeImportPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // レシピの取り込み画面（URL：/recipes/new）。レシピ一覧の「＋」から開く
+// 今回の変更：最初に開くタブを「写真」にした／アプリ内カメラで、続けて撮れるようにした（撮影→続けて撮る→完了）
 //   ① 入力：テキストを貼る／写真を選ぶ（最大4枚）→「AIで読み取る」
 //   ② 材料の登録：材料マスタに無い材料（や単位）があるときだけ表示。栄養素・カロリー・価格・旬・単位をAIが推定する
 //   ③ 確認・修正：AIが読み取った内容を、保存の前に直す。料理写真（表示用）もここで選べる
@@ -9,6 +10,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useOutletContext } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
 import ImportPreviewEditor from '../components/ImportPreviewEditor'
+import CameraCapture from '../components/CameraCapture'
 import IngredientRegisterStep from '../components/IngredientRegisterStep'
 import type { AiStatus } from '../components/IngredientRegisterStep'
 import { errorText } from '../lib/errorText'
@@ -47,7 +49,8 @@ export default function RecipeImportPage() {
   const aiRun = useRef(0) // 材料の分析の、何回目の呼び出しか（古い結果を捨てるため）
 
   const [stage, setStage] = useState<Stage>('input')
-  const [tab, setTab] = useState<Tab>('text')
+  const [tab, setTab] = useState<Tab>('photo')
+  const [cameraOpen, setCameraOpen] = useState(false)
 
   // ① 入力
   const [text, setText] = useState('')
@@ -357,8 +360,8 @@ export default function RecipeImportPage() {
           <div className="mb-3 grid grid-cols-2 overflow-hidden rounded-lg border border-gray-200 bg-white text-sm font-bold">
             {(
               [
-                ['text', '✍️ テキスト'],
                 ['photo', '📷 写真'],
+                ['text', '✍️ テキスト'],
               ] as const
             ).map(([t, label]) => (
               <button
@@ -426,17 +429,27 @@ export default function RecipeImportPage() {
                   </div>
                 ))}
                 {images.length < MAX_IMAGES && (
-                  <button
-                    type="button"
-                    onClick={() => fileRef.current?.click()}
-                    disabled={compressing}
-                    className="flex aspect-[4/3] flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-300 bg-white text-gray-500 active:bg-gray-50 disabled:opacity-50"
-                  >
-                    <span className="text-2xl leading-none">{compressing ? '⏳' : '📷'}</span>
-                    <span className="mt-1 text-xs font-semibold">
-                      {compressing ? '変換中…' : images.length === 0 ? '写真を選ぶ' : '写真を追加'}
-                    </span>
-                  </button>
+                  <div className="grid aspect-[4/3] grid-rows-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInputError(null)
+                        setCameraOpen(true)
+                      }}
+                      disabled={compressing}
+                      className="flex items-center justify-center gap-1.5 rounded-lg bg-amber-500 text-sm font-bold text-white active:opacity-80 disabled:opacity-50"
+                    >
+                      📷 カメラで撮る
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => fileRef.current?.click()}
+                      disabled={compressing}
+                      className="flex items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-gray-300 bg-white text-sm font-semibold text-gray-500 active:bg-gray-50 disabled:opacity-50"
+                    >
+                      {compressing ? '⏳ 変換中…' : '🖼 写真を選ぶ'}
+                    </button>
+                  </div>
                 )}
               </div>
 
@@ -483,6 +496,23 @@ export default function RecipeImportPage() {
             <p>・読み取った内容は、次の画面で直してから保存します（この時点では保存されません）。</p>
           </div>
         </div>
+      )}
+
+      {/* アプリ内カメラ（続けて撮れる） */}
+      {cameraOpen && (
+        <CameraCapture
+          room={MAX_IMAGES - images.length}
+          shots={images}
+          onShot={(shot) =>
+            setImages((prev) => (prev.length >= MAX_IMAGES ? prev : [...prev, { id: newKey(), ...shot }]))
+          }
+          onUndo={() => setImages((prev) => prev.slice(0, -1))}
+          onClose={() => setCameraOpen(false)}
+          onFallback={() => {
+            setCameraOpen(false)
+            fileRef.current?.click()
+          }}
+        />
       )}
     </div>
   )

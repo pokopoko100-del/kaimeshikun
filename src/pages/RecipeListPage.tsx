@@ -1,5 +1,10 @@
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：カロリー・値段は「1人前」で固定表示（人数切替をなくした）。献立に追加したときは、設定画面の「人数の初期値」を planned_servings に入れる
+// 今回の変更：
+//  ・献立の状態は「候補」「確定」の文字をやめ、カードの色で表示（候補＝オレンジ枠／確定・購入済＝緑枠）
+//  ・写真を大きくした（写真表示は4:3、リスト表示のサムネも大きめ）
+//  ・「※未計算あり」の表示をなくした
+//  ・献立から外すときは、購入済（plan_purchased）も解除する
+// 前回の変更：カロリー・値段は「1人前」で固定表示（人数切替をなくした）。献立に追加したときは、設定画面の「人数の初期値」を planned_servings に入れる
 // 前回の変更：検索ボックスの右に、レシピ取り込み（テキスト・写真）へ進む「＋」ボタンを追加（それ以外は前と同じ）
 // 今回の変更：リスト表示のスワイプを「右スワイプ」で献立候補に追加／献立から外す に変更（これまでは左スワイプ）
 // 前提：recipe_nutrition ビュー（01）と、recipes.plan_confirmed 列（09）を作成済みであること
@@ -35,6 +40,7 @@ type Recipe = Pick<
   | 'image_path'
   | 'is_planned'
   | 'plan_confirmed'
+  | 'plan_purchased'
   | 'updated_at'
 >
 
@@ -166,10 +172,14 @@ function fmtVal(value: number | null, unit: string): string {
 }
 
 
-// 献立の状態：候補／確定／なし
-function planLabel(r: Pick<Recipe, 'is_planned' | 'plan_confirmed'>): '確定' | '候補' | null {
-  if (!r.is_planned) return null
-  return r.plan_confirmed ? '確定' : '候補'
+// 献立の状態の色（候補＝オレンジ枠／確定・購入済＝緑枠／なし＝枠なし）
+function planRing(r: Pick<Recipe, 'is_planned' | 'plan_confirmed'>): string {
+  if (!r.is_planned) return ''
+  return r.plan_confirmed ? 'ring-2 ring-green-500' : 'ring-2 ring-orange-400'
+}
+function planBg(r: Pick<Recipe, 'is_planned' | 'plan_confirmed'>): string {
+  if (!r.is_planned) return 'bg-white'
+  return r.plan_confirmed ? 'bg-green-50' : 'bg-orange-50'
 }
 
 type Toast = { message: string; undo: () => void }
@@ -203,7 +213,7 @@ export default function RecipeListPage() {
         supabase
           .from('recipes')
           .select(
-            'id, dish_name, genre, category, source_name, cooking_time_minutes, cook_count, image_path, is_planned, plan_confirmed, updated_at',
+            'id, dish_name, genre, category, source_name, cooking_time_minutes, cook_count, image_path, is_planned, plan_confirmed, plan_purchased, updated_at',
           )
           .order('updated_at', { ascending: false }),
         supabase.from('recipe_nutrition').select('*'),
@@ -261,7 +271,7 @@ export default function RecipeListPage() {
     state: { is_planned: boolean; plan_confirmed: boolean },
   ): Promise<boolean> => {
     const prev = recipes.find((r) => r.id === id)
-    setRecipes((list) => list.map((r) => (r.id === id ? { ...r, ...state } : r)))
+    setRecipes((list) => list.map((r) => (r.id === id ? { ...r, ...state, plan_purchased: false } : r)))
     // 献立に入れるときは「何人前つくるか」の初期値（設定画面）を入れる。外すときは空にする
     const plannedServings = state.is_planned ? await defaultPlanServingsFor(session.user.id) : null
     const { data, error: updError } = await supabase
@@ -269,6 +279,7 @@ export default function RecipeListPage() {
       .update({
         is_planned: state.is_planned,
         plan_confirmed: state.plan_confirmed,
+        plan_purchased: false,
         planned_by: state.is_planned ? session.user.id : null,
         planned_at: state.is_planned ? new Date().toISOString() : null,
         planned_servings: plannedServings,
@@ -280,7 +291,9 @@ export default function RecipeListPage() {
       if (prev) {
         setRecipes((list) =>
           list.map((r) =>
-            r.id === id ? { ...r, is_planned: prev.is_planned, plan_confirmed: prev.plan_confirmed } : r,
+            r.id === id
+                ? { ...r, is_planned: prev.is_planned, plan_confirmed: prev.plan_confirmed, plan_purchased: prev.plan_purchased }
+                : r,
           ),
         )
       }
@@ -491,7 +504,9 @@ export default function RecipeListPage() {
         <div className="mt-2 flex items-center justify-between gap-2 text-xs text-gray-500">
           <span className="shrink-0">{loading ? '読み込み中…' : `${sorted.length}件`}</span>
           <span className="min-w-0 truncate text-[10px] text-gray-400">
-            {viewMode === 'list' ? '右スワイプで献立候補に追加 →' : '右上の＋で献立候補に追加'}
+            <span className="mr-1 inline-block h-2.5 w-2.5 rounded-sm align-middle ring-2 ring-orange-400" />候補
+            <span className="ml-1.5 mr-1 inline-block h-2.5 w-2.5 rounded-sm align-middle ring-2 ring-green-500" />確定
+            <span className="ml-1.5">{viewMode === 'list' ? '右スワイプで追加' : '＋で追加'}</span>
           </span>
           <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-600">1人前</span>
         </div>
@@ -563,21 +578,6 @@ export default function RecipeListPage() {
 
 type SortNutrientInfo = { label: string; unit: string; col: string } | null
 
-// 献立の状態バッジ（候補＝オレンジの薄色／確定＝緑）
-function PlanBadge({ recipe }: { recipe: Pick<Recipe, 'is_planned' | 'plan_confirmed'> }) {
-  const label = planLabel(recipe)
-  if (!label) return null
-  return (
-    <span
-      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${
-        label === '確定' ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-600'
-      }`}
-    >
-      {label}
-    </span>
-  )
-}
-
 // ---------- スワイプ時の表示（右スワイプ：献立候補に追加／献立から外す） ----------
 const SWIPE_ADD: SwipeAction = { label: '＋ 献立候補', readyLabel: '離して追加', className: 'bg-orange-500' }
 const SWIPE_REMOVE: SwipeAction = { label: '献立から外す', readyLabel: '離して外す', className: 'bg-gray-500' }
@@ -597,26 +597,15 @@ function PhotoCard({
   const title = r.source_name ? `${r.dish_name} / ${r.source_name}` : r.dish_name
   const kcal = nv(r, 'calorie_per_serving')
   const price = nv(r, 'price_per_serving')
-  const unresolved = unresolvedCount(r)
-  const label = planLabel(r)
 
   return (
     <div className="relative">
       <Link to={`/recipes/${r.id}`} className="block active:opacity-70">
-        <div className="relative aspect-video overflow-hidden rounded-xl bg-gray-200">
+        <div className={`relative aspect-[4/3] overflow-hidden rounded-xl bg-gray-200 ${planRing(r)}`}>
           {imageUrl ? (
             <img src={imageUrl} alt={r.dish_name} loading="lazy" className="h-full w-full object-cover" />
           ) : (
             <div className="flex h-full w-full items-center justify-center text-3xl">🍽️</div>
-          )}
-          {label && (
-            <span
-              className={`absolute left-1 top-1 rounded px-1.5 py-0.5 text-[10px] font-bold text-white ${
-                label === '確定' ? 'bg-green-600' : 'bg-orange-500'
-              }`}
-            >
-              {label}
-            </span>
           )}
           {r.cooking_time_minutes != null && (
             <span className="absolute bottom-1 right-1 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-bold text-white">
@@ -633,7 +622,6 @@ function PhotoCard({
           {fmtVal(price, '円')}
           {' ・ '}
           {r.cook_count}回
-          {unresolved > 0 && <span className="ml-1 text-amber-600">※未計算あり</span>}
         </p>
       </Link>
 
@@ -664,10 +652,12 @@ function ListCard({
   const genre = genreOf(r)
   const kcal = nv(r, 'calorie_per_serving')
   const price = nv(r, 'price_per_serving')
-  const unresolved = unresolvedCount(r)
-
   return (
-    <Link to={`/recipes/${r.id}`} draggable={false} className="block rounded-xl bg-white shadow-sm active:opacity-70">
+    <Link
+      to={`/recipes/${r.id}`}
+      draggable={false}
+      className={`block rounded-xl shadow-sm active:opacity-70 ${planBg(r)} ${planRing(r)} ring-inset`}
+    >
       <div className="flex items-center px-4 py-3">
         {/* 左：①ジャンル＋サブカテゴリ＋献立の状態 ②料理名 ③引用元（左揃え） */}
         <div className="min-w-0 flex-1 text-left">
@@ -676,7 +666,6 @@ function ListCard({
             {r.category && (
               <span className="truncate rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">{r.category}</span>
             )}
-            <PlanBadge recipe={r} />
           </div>
           <div className="mt-1 truncate font-medium text-gray-800">{r.dish_name}</div>
           {r.source_name && <div className="mt-0.5 truncate text-xs text-gray-400">{r.source_name}</div>}
@@ -684,7 +673,7 @@ function ListCard({
 
         {/* 中央：サムネ（写真があるときだけ小さく） */}
         {imageUrl && (
-          <div className="mx-2 h-11 w-11 shrink-0 overflow-hidden rounded-lg border border-gray-200 bg-gray-100">
+          <div className="mx-2 h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-gray-200 bg-gray-100">
             <img src={imageUrl} alt={r.dish_name} loading="lazy" draggable={false} className="h-full w-full object-cover" />
           </div>
         )}
@@ -704,7 +693,6 @@ function ListCard({
           <div className="mt-0.5 text-[10px] text-gray-400">
             （⏱ {r.cooking_time_minutes != null ? `${r.cooking_time_minutes}分` : '―'}, {r.cook_count}回作った）
           </div>
-          {unresolved > 0 && <div className="text-[10px] text-amber-600">※未計算あり</div>}
         </div>
       </div>
     </Link>
@@ -714,7 +702,7 @@ function ListCard({
 function SkeletonCard() {
   return (
     <div className="animate-pulse">
-      <div className="aspect-video rounded-xl bg-gray-200" />
+      <div className="aspect-[4/3] rounded-xl bg-gray-200" />
       <div className="mt-2 h-3 w-4/5 rounded bg-gray-200" />
       <div className="mt-1.5 h-3 w-3/5 rounded bg-gray-200" />
     </div>

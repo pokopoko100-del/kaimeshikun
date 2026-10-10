@@ -3,7 +3,8 @@
 //   ・AIの解析は Supabase の関数 analyze-recipe（自分のGeminiキーで動く）。この関数は「読み取るだけ」で保存はしない
 //   ・保存は、この画面から recipes → steps → ingredients の順に行う（途中で失敗したら、作りかけのレシピを消して元に戻す）
 //   ・「未計算になるか」の判定は、レシピ詳細・サーバー側の関数（recipe_nutrition ビュー）と同じルール
-// 今回の変更：
+// 今回の変更：工程・材料の保存を insertStepsAndIngredients にまとめた（レシピの編集でも使う）
+// 前回の変更：
 //   ・何人前をAIが推定したときのフラグ（servingsEstimated）を追加。人数は1〜20
 //   ・AIの推定（調理時間・人数）の注意は、確認画面の欄の横に出すので、注意の一覧からは外す
 // 前回の変更：
@@ -304,16 +305,9 @@ export function validateDraft(d: Draft): string | null {
   return null
 }
 
-// 保存の結果。写真だけ失敗したときは、レシピは保存できているので photoError に理由を入れて返す
-export type SaveResult = { id: string; photoError: string | null }
-
-export async function saveDraft(d: Draft, userId: string, photo: Blob | null = null): Promise<SaveResult> {
-  const msg = validateDraft(d)
-  if (msg) throw new Error(msg)
-
-  const householdId = await getHouseholdId(userId)
-
-  // 空の工程・材料は捨てる。工程は 1,2,3… に振り直す
+// 工程・材料を保存する（新規の保存と、編集の保存で共通）
+//   ・空の工程・名前が空の材料は捨てる。工程は 1,2,3… に振り直し、材料の「使う工程」も合わせる
+export async function insertStepsAndIngredients(recipeId: string, d: Draft): Promise<void> {
   const noMap = new Map<number, number>() // 画面上の工程番号 → 保存する工程番号
   const keptSteps: DraftStep[] = []
   d.steps.forEach((s, i) => {
@@ -323,6 +317,56 @@ export async function saveDraft(d: Draft, userId: string, photo: Blob | null = n
     }
   })
   const keptIngs = d.ingredients.filter((i) => i.name.trim() !== '')
+
+  const stepIdByNo = new Map<number, string>()
+  if (keptSteps.length > 0) {
+    const { data: stepRows, error: stepErr } = await supabase
+      .from('steps')
+      .insert(
+        keptSteps.map((s, i) => ({
+          recipe_id: recipeId,
+          step_number: i + 1,
+          step_name: s.name.trim() || null,
+          description: s.description.trim() || null,
+          tip: s.tip.trim() || null,
+        })),
+      )
+      .select('id, step_number')
+    if (stepErr) throw stepErr
+    for (const r of (stepRows ?? []) as { id: string; step_number: number }[]) {
+      stepIdByNo.set(r.step_number, r.id)
+    }
+  }
+
+  if (keptIngs.length === 0) return
+  const { error: ingErr } = await supabase.from('ingredients').insert(
+    keptIngs.map((ing, i) => {
+      const newNo = ing.stepNo != null ? noMap.get(ing.stepNo) : undefined
+      const group = ing.group.normalize('NFKC').trim().toUpperCase()
+      return {
+        recipe_id: recipeId,
+        sort_order: i,
+        ingredient_master_id: ing.masterId,
+        ingredient_name: ing.name.trim(),
+        quantity: ing.quantity.normalize('NFKC').trim() || null,
+        unit: normUnit(ing.unit) || null,
+        preparation: ing.preparation.trim() || null,
+        step_id: newNo != null ? (stepIdByNo.get(newNo) ?? null) : null,
+        group_label: /^[A-Z]$/.test(group) ? group : null,
+      }
+    }),
+  )
+  if (ingErr) throw ingErr
+}
+
+// 保存の結果。写真だけ失敗したときは、レシピは保存できているので photoError に理由を入れて返す
+export type SaveResult = { id: string; photoError: string | null }
+
+export async function saveDraft(d: Draft, userId: string, photo: Blob | null = null): Promise<SaveResult> {
+  const msg = validateDraft(d)
+  if (msg) throw new Error(msg)
+
+  const householdId = await getHouseholdId(userId)
 
   // ① レシピ本体
   const { data: rec, error: recErr } = await supabase
@@ -352,46 +396,7 @@ export async function saveDraft(d: Draft, userId: string, photo: Blob | null = n
   const recipeId = rec.id as string
 
   try {
-    // ② 工程
-    const stepIdByNo = new Map<number, string>()
-    if (keptSteps.length > 0) {
-      const { data: stepRows, error: stepErr } = await supabase
-        .from('steps')
-        .insert(
-          keptSteps.map((s, i) => ({
-            recipe_id: recipeId,
-            step_number: i + 1,
-            step_name: s.name.trim() || null,
-            description: s.description.trim() || null,
-            tip: s.tip.trim() || null,
-          })),
-        )
-        .select('id, step_number')
-      if (stepErr) throw stepErr
-      for (const r of (stepRows ?? []) as { id: string; step_number: number }[]) {
-        stepIdByNo.set(r.step_number, r.id)
-      }
-    }
-
-    // ③ 材料
-    const { error: ingErr } = await supabase.from('ingredients').insert(
-      keptIngs.map((ing, i) => {
-        const newNo = ing.stepNo != null ? noMap.get(ing.stepNo) : undefined
-        const group = ing.group.normalize('NFKC').trim().toUpperCase()
-        return {
-          recipe_id: recipeId,
-          sort_order: i,
-          ingredient_master_id: ing.masterId,
-          ingredient_name: ing.name.trim(),
-          quantity: ing.quantity.normalize('NFKC').trim() || null,
-          unit: normUnit(ing.unit) || null,
-          preparation: ing.preparation.trim() || null,
-          step_id: newNo != null ? (stepIdByNo.get(newNo) ?? null) : null,
-          group_label: /^[A-Z]$/.test(group) ? group : null,
-        }
-      }),
-    )
-    if (ingErr) throw ingErr
+    await insertStepsAndIngredients(recipeId, d)
   } catch (e) {
     // 作りかけのレシピを消して、元に戻す（工程・材料はレシピと一緒に消える）
     const { error: delErr } = await supabase.from('recipes').delete().eq('id', recipeId)

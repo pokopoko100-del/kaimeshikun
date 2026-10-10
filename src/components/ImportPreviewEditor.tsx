@@ -1,6 +1,7 @@
 // src/components/ImportPreviewEditor.tsx（ファイル全体。これで丸ごと置き換えてください）
 // レシピ取り込みの「確認・修正」画面の中身。AIが読み取った内容を、保存する前に直せる
-// 今回の変更：レシピ詳細画面と同じ見た目にした（そのまま書き換えられる）
+// 今回の変更：材料の記号（A・B…）のバッジを青にした（工程番号のオレンジと見分けやすく）。レシピの編集画面でも使う
+// 前回の変更：レシピ詳細画面と同じ見た目にした（そのまま書き換えられる）
 //   ・上から：料理写真（右下に登録／変更）→ 料理名・参考元・時間・標準の人前 → 作り方（各工程の中に、その工程の材料）
 //   ・「材料」だけの一覧はなくした（作り方と重なるため）。工程に入っていない材料があるときだけ、作り方の上にまとめて出す
 //   ・材料ごとに「未計算になるか」をバッジで表示。✎ を押すと、材料マスタ・使う工程・記号・下ごしらえを直せる
@@ -193,7 +194,7 @@ export default function ImportPreviewEditor({
         </div>
         {(ing.preparation || ing.group) && !opened && (
           <p className="text-[11px] text-gray-400">
-            {ing.group && <span className="mr-1 rounded-full bg-orange-500 px-1.5 text-[10px] font-bold text-white">{ing.group}</span>}
+            {ing.group && <span className="mr-1 rounded-full bg-sky-600 px-1.5 text-[10px] font-bold text-white">{ing.group}</span>}
             {ing.preparation && `(${ing.preparation})`}
           </p>
         )}
@@ -571,4 +572,3 @@ export default function ImportPreviewEditor({
     </div>
   )
 }
-

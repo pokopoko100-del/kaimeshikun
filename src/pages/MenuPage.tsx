@@ -1,5 +1,11 @@
 // src/pages/MenuPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 今回の変更：
+//  ・「確定(購入済)」を追加（14_menu_purchased_migration.sql）。確定した料理を買い物リストに追加すると、購入済に移る（確定より上に表示）
+//      【確定(購入済)】 → 右スワイプ：作った ／ ← 左スワイプ：確定に戻す・候補に戻す・削除 を選ぶ
+//      【確定】        → 右スワイプ：なし   ／ ← 左スワイプ：候補に戻す・削除 を選ぶ
+//      「買い物リストに追加」は、まだ購入済になっていない確定の料理だけが対象
+//  ・料理名をタップしてレシピを開くと、材料は献立の人数で表示される（?servings=）
+// 前回の変更：
 //  ・レシピごとに「何人前つくるか」（planned_servings）を入れられるようにした（行の下の －○人前＋）。横に、レシピの標準の人前を表示
 //    献立に入れたときの初期値は、設定画面の「献立に追加したときの人数」。買い物リストの分量は、この人数で計算する
 //  ・カロリー・値段は「1人前」で表示（画面全体の人数切替はなくした）。上の「1食平均」も1人前
@@ -37,6 +43,7 @@ type Recipe = Pick<
   | 'cook_count'
   | 'is_planned'
   | 'plan_confirmed'
+  | 'plan_purchased'
   | 'planned_by'
   | 'planned_at'
   | 'planned_servings'
@@ -52,6 +59,7 @@ type MenuRow = Recipe & {
 type Patch = {
   is_planned: boolean
   plan_confirmed: boolean
+  plan_purchased: boolean
   planned_by: string | null
   planned_at: string | null
   cook_count: number
@@ -84,6 +92,7 @@ function snapshot(r: MenuRow): Patch {
   return {
     is_planned: r.is_planned,
     plan_confirmed: r.plan_confirmed,
+    plan_purchased: r.plan_purchased,
     planned_by: r.planned_by,
     planned_at: r.planned_at,
     cook_count: r.cook_count,
@@ -94,7 +103,7 @@ function snapshot(r: MenuRow): Patch {
 const ACT_CONFIRM: SwipeAction = { label: '✅ 確定', readyLabel: '離して確定', className: 'bg-green-600' }
 const ACT_DELETE: SwipeAction = { label: '削除', readyLabel: '離して削除', className: 'bg-red-500' }
 const ACT_COOKED: SwipeAction = { label: '🍳 作った', readyLabel: '離して作った', className: 'bg-amber-500' }
-const ACT_BACK: SwipeAction = { label: '↩ 候補に戻す', readyLabel: '離して戻す', className: 'bg-gray-500' }
+const ACT_MORE: SwipeAction = { label: '戻す・削除', readyLabel: '離して選ぶ', className: 'bg-gray-500' }
 
 export default function MenuPage() {
   const { session } = useOutletContext<{ session: Session }>()
@@ -108,12 +117,13 @@ export default function MenuPage() {
   const busyRef = useRef(false) // 自分の操作中は、Realtimeでの読み込み直しを止める
   const [toast, setToast] = useState<Toast | null>(null)
   const [showAdd, setShowAdd] = useState(false) // 「買い物リストに追加」の確認画面
+  const [choice, setChoice] = useState<MenuRow | null>(null) // 左スワイプで出す選択（戻す・削除）
 
   const load = useCallback(async () => {
     const { data, error: recErr } = await supabase
       .from('recipes')
       .select(
-        'id, dish_name, servings, category, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at, planned_servings',
+        'id, dish_name, servings, category, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, plan_purchased, planned_by, planned_at, planned_servings',
       )
       .eq('is_planned', true)
 
@@ -235,15 +245,17 @@ export default function MenuPage() {
 
   // ---- 各操作 ----
   const confirm = (r: MenuRow) =>
-    act(r, { ...snapshot(r), plan_confirmed: true }, `「${r.dish_name}」を確定しました`)
+    act(r, { ...snapshot(r), plan_confirmed: true, plan_purchased: false }, `「${r.dish_name}」を確定しました`)
 
   const backToCandidate = (r: MenuRow) =>
-    act(r, { ...snapshot(r), plan_confirmed: false }, `「${r.dish_name}」を候補に戻しました`)
+    act(r, { ...snapshot(r), plan_confirmed: false, plan_purchased: false }, `「${r.dish_name}」を候補に戻しました`)
+  const backToConfirmed = (r: MenuRow) =>
+    act(r, { ...snapshot(r), plan_purchased: false }, `「${r.dish_name}」を確定（未購入）に戻しました`)
 
   const removeFromMenu = (r: MenuRow) =>
     act(
       r,
-      { ...snapshot(r), is_planned: false, plan_confirmed: false, planned_by: null, planned_at: null },
+      { ...snapshot(r), is_planned: false, plan_confirmed: false, plan_purchased: false, planned_by: null, planned_at: null },
       `「${r.dish_name}」を献立から削除しました（レシピは残ります）`,
     )
 
@@ -280,6 +292,7 @@ export default function MenuPage() {
     const ok = await applyPatch(r.id, {
       is_planned: false,
       plan_confirmed: false,
+      plan_purchased: false,
       planned_by: null,
       planned_at: null,
       cook_count: r.cook_count + 1,
@@ -300,6 +313,23 @@ export default function MenuPage() {
         setToast(null)
       },
     })
+  }
+
+  // 買い物リストに追加した確定の料理を「購入済」にする
+  const markPurchased = async (ids: string[]) => {
+    if (ids.length === 0) return
+    setRows((list) => list.map((x) => (ids.includes(x.id) ? { ...x, plan_purchased: true } : x)))
+    busyRef.current = true
+    const { error: updErr } = await supabase.from('recipes').update({ plan_purchased: true }).in('id', ids)
+    busyRef.current = false
+    if (updErr) {
+      setRows((list) => list.map((x) => (ids.includes(x.id) ? { ...x, plan_purchased: false } : x)))
+      alert(
+        '購入済への切り替えに失敗しました: ' +
+          errorText(updErr) +
+          '（14_menu_purchased_migration.sql を実行済みか確認してください）',
+      )
+    }
   }
 
   // 何人前つくるか：変えるとすぐ保存（失敗したら元に戻す）
@@ -324,22 +354,24 @@ export default function MenuPage() {
   }
 
   // 確定／候補に分ける（追加した順に並べる。新しいものが上）
-  const { confirmed, candidates } = useMemo(() => {
+  const { purchased, confirmed, candidates } = useMemo(() => {
     const byPlanned = (a: MenuRow, b: MenuRow) => (b.planned_at ?? '').localeCompare(a.planned_at ?? '')
     const planned = rows.filter((r) => r.is_planned)
     return {
-      confirmed: planned.filter((r) => r.plan_confirmed).sort(byPlanned),
+      purchased: planned.filter((r) => r.plan_confirmed && r.plan_purchased).sort(byPlanned),
+      confirmed: planned.filter((r) => r.plan_confirmed && !r.plan_purchased).sort(byPlanned),
       candidates: planned.filter((r) => !r.plan_confirmed).sort(byPlanned),
     }
   }, [rows])
 
   // 1食あたりの平均（確定した料理ぜんぶの合計 ÷ 食事回数）。食事回数＝主菜と麺・丼・ワンプレートの数
   const stats = useMemo(() => {
-    const meals = confirmed.filter((r) => r.category != null && MEAL_CATEGORIES.includes(r.category)).length
+    const all = [...purchased, ...confirmed]
+    const meals = all.filter((r) => r.category != null && MEAL_CATEGORIES.includes(r.category)).length
     let totalKcal = 0
     let totalPrice = 0
     let uncertain = false
-    for (const r of confirmed) {
+    for (const r of all) {
       if (r.kcal != null) totalKcal += r.kcal
       else uncertain = true
       if (r.price != null) totalPrice += r.price
@@ -352,7 +384,7 @@ export default function MenuPage() {
       avgPrice: meals > 0 ? totalPrice / meals : null,
       uncertain,
     }
-  }, [confirmed])
+  }, [purchased, confirmed])
 
   return (
     <div className="min-h-screen bg-gray-50 pb-6">
@@ -383,7 +415,7 @@ export default function MenuPage() {
           className="w-full rounded-lg bg-amber-500 py-2.5 text-sm font-bold text-white shadow-sm active:opacity-80 disabled:bg-gray-300"
         >
           {confirmed.length === 0
-            ? '🛒 買い物リストに追加（確定した料理がありません）'
+            ? '🛒 買い物リストに追加（未購入の確定がありません）'
             : `🛒 買い物リストに追加（確定 ${confirmed.length}品）`}
         </button>
       </div>
@@ -398,25 +430,34 @@ export default function MenuPage() {
         </div>
       ) : (
         <div className="px-2 pt-2">
-          {/* 確定（見出しの右端に人数切替） */}
-          <SectionTitle
-            icon="✅"
-            title="確定"
-            count={confirmed.length}
-            hint="→作った ←戻す"
-          />
+          {/* 確定(購入済)：買い物リストに追加済み */}
+          {purchased.length > 0 && (
+            <>
+              <SectionTitle icon="🛍" title="確定(購入済)" count={purchased.length} hint="→作った ←戻す・削除" />
+              <div className="mb-4 space-y-1">
+                {purchased.map((r) => (
+                  <SwipeRow
+                    key={r.id}
+                    right={ACT_COOKED}
+                    left={ACT_MORE}
+                    onSwipeRight={() => markCooked(r)}
+                    onSwipeLeft={() => setChoice(r)}
+                  >
+                    <MenuLine row={r} onServings={(n) => void setPlannedServings(r, n)} />
+                  </SwipeRow>
+                ))}
+              </div>
+            </>
+          )}
+
+          {/* 確定（まだ買い物リストに追加していない） */}
+          <SectionTitle icon="✅" title="確定" count={confirmed.length} hint="←戻す・削除" />
           {confirmed.length === 0 ? (
             <Empty text="確定した料理はありません（候補を右にスワイプ）" />
           ) : (
             <div className="space-y-1">
               {confirmed.map((r) => (
-                <SwipeRow
-                  key={r.id}
-                  right={ACT_COOKED}
-                  left={ACT_BACK}
-                  onSwipeRight={() => markCooked(r)}
-                  onSwipeLeft={() => backToCandidate(r)}
-                >
+                <SwipeRow key={r.id} left={ACT_MORE} onSwipeLeft={() => setChoice(r)}>
                   <MenuLine row={r} onServings={(n) => void setPlannedServings(r, n)} />
                 </SwipeRow>
               ))}
@@ -459,6 +500,7 @@ export default function MenuPage() {
           onClose={() => setShowAdd(false)}
           onAdded={(count) => {
             setShowAdd(false)
+            void markPurchased(confirmed.map((r) => r.id))
             setToast({
               message: `${count}件を買い物リストに追加しました`,
               actionLabel: '見る',
@@ -469,6 +511,62 @@ export default function MenuPage() {
             })
           }}
         />
+      )}
+
+      {/* 左スワイプの選択：確定に戻す（購入済のとき）・候補に戻す・削除 */}
+      {choice && (
+        <div className="fixed inset-0 z-[60] flex items-end bg-black/40" onClick={() => setChoice(null)}>
+          <div
+            className="w-full rounded-t-2xl bg-white px-4 pt-4"
+            style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-[11px] text-gray-400">{choice.plan_purchased ? '確定(購入済)' : '確定'}</p>
+            <h3 className="mb-3 truncate text-base font-bold text-gray-900">{choice.dish_name}</h3>
+            {choice.plan_purchased && (
+              <button
+                type="button"
+                onClick={() => {
+                  const r = choice
+                  setChoice(null)
+                  void backToConfirmed(r)
+                }}
+                className="mb-2 w-full rounded-xl border border-gray-200 px-4 py-3 text-left text-sm font-bold text-gray-800 active:bg-gray-50"
+              >
+                ✅ 確定（未購入）に戻す
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                const r = choice
+                setChoice(null)
+                void backToCandidate(r)
+              }}
+              className="mb-2 w-full rounded-xl border border-gray-200 px-4 py-3 text-left text-sm font-bold text-gray-800 active:bg-gray-50"
+            >
+              ↩ 候補に戻す
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const r = choice
+                setChoice(null)
+                void removeFromMenu(r)
+              }}
+              className="mb-2 w-full rounded-xl border border-red-200 px-4 py-3 text-left text-sm font-bold text-red-600 active:bg-red-50"
+            >
+              🗑 献立から削除（レシピは残ります）
+            </button>
+            <button
+              type="button"
+              onClick={() => setChoice(null)}
+              className="mt-1 w-full rounded-xl bg-gray-100 py-3 text-sm font-bold text-gray-600"
+            >
+              キャンセル
+            </button>
+          </div>
+        </div>
       )}
 
       {/* 操作のあとに出るメッセージ */}
@@ -526,7 +624,7 @@ function Empty({ text }: { text: string }) {
 function MenuLine({ row: r, onServings }: { row: MenuRow; onServings: (n: number) => void }) {
   return (
     <div className="px-3 py-1.5">
-      <Link to={`/recipes/${r.id}`} draggable={false} className="flex items-center gap-2 active:opacity-70">
+      <Link to={`/recipes/${r.id}?servings=${plannedOf(r)}`} draggable={false} className="flex items-center gap-2 active:opacity-70">
         {/* 左：①料理名 ②引用元（左揃え。長いときは省略） */}
         <div className="min-w-0 flex-1 text-left">
           <div className="truncate text-sm font-medium leading-tight text-gray-800">

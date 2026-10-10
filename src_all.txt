@@ -273,6 +273,79 @@ html {
   }
 }
 
+===== src\components\DefaultPlanServingsSettings.tsx =====
+// src/components/DefaultPlanServingsSettings.tsx（新規作成）
+// 設定画面の「献立に追加したときの人数」：レシピを献立に入れたときの「何人前つくるか」の初期値（家族で共通）
+//   ・献立画面で、レシピごとに変えられる。ここで変えても、すでに献立にあるレシピの人数は変わらない
+import { useEffect, useState } from 'react'
+import { useOutletContext } from 'react-router-dom'
+import type { Session } from '@supabase/supabase-js'
+import ServingsStepper from './ServingsStepper'
+import {
+  DEFAULT_PLAN_SERVINGS,
+  MAX_PLAN_SERVINGS,
+  MIN_PLAN_SERVINGS,
+  fetchDefaultPlanServings,
+  getHouseholdId,
+  saveDefaultPlanServings,
+} from '../lib/household'
+import { errorText } from '../lib/errorText'
+
+export default function DefaultPlanServingsSettings() {
+  const { session } = useOutletContext<{ session: Session }>()
+  const [householdId, setHouseholdId] = useState<string | null>(null)
+  const [value, setValue] = useState(DEFAULT_PLAN_SERVINGS)
+  const [loading, setLoading] = useState(true)
+  const [status, setStatus] = useState<string | null>(null)
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const id = await getHouseholdId(session.user.id)
+        setHouseholdId(id)
+        setValue(await fetchDefaultPlanServings(id))
+      } catch (e) {
+        setStatus('読み込みに失敗しました：' + errorText(e))
+      } finally {
+        setLoading(false)
+      }
+    })()
+  }, [session.user.id])
+
+  const change = async (next: number) => {
+    if (!householdId) return
+    const prev = value
+    setValue(next)
+    setStatus('保存中…')
+    try {
+      await saveDefaultPlanServings(householdId, next)
+      setStatus('保存しました')
+    } catch (e) {
+      setValue(prev)
+      setStatus('保存に失敗しました：' + errorText(e) + '（13_servings_migration.sql を実行済みか確認してください）')
+    }
+  }
+
+  return (
+    <div className="text-sm text-gray-700">
+      <p className="text-[11px] leading-relaxed text-gray-400">
+        レシピを献立に入れたときの「何人前つくるか」の初期値です。献立画面で、レシピごとに変えられます。家族で共通の設定です。
+      </p>
+      <div className="mt-3 flex items-center justify-between">
+        <span className="text-xs font-semibold text-gray-600">初期値</span>
+        <ServingsStepper
+          value={value}
+          onChange={(n) => void change(n)}
+          min={MIN_PLAN_SERVINGS}
+          max={MAX_PLAN_SERVINGS}
+          disabled={loading || !householdId}
+        />
+      </div>
+      {status && <p className="mt-2 text-[11px] text-gray-400">{status}</p>}
+    </div>
+  )
+}
+
 ===== src\components\GeminiKeySettings.tsx =====
 // src/components/GeminiKeySettings.tsx（新規作成）
 // 設定画面の「Gemini APIキー」：自分のキーを登録・入れ替え・削除する
@@ -461,15 +534,13 @@ export default function GeminiKeySettings() {
 ===== src\components\ImportPreviewEditor.tsx =====
 // src/components/ImportPreviewEditor.tsx（ファイル全体。これで丸ごと置き換えてください）
 // レシピ取り込みの「確認・修正」画面の中身。AIが読み取った内容を、保存する前に直せる
-//   ・料理写真（表示用）／基本情報（料理名・参考元・ジャンル…）／材料／作り方
-//   ・材料ごとに「未計算になるか」を、材料マスタと照らして、その場で表示する
-//     （マスタに無い・単位が合わない・分量が数値でない、のどれか）
+// 今回の変更：レシピ詳細画面と同じ見た目にした（そのまま書き換えられる）
+//   ・上から：料理写真（右下に登録／変更）→ 料理名・参考元・時間・標準の人前 → 作り方（各工程の中に、その工程の材料）
+//   ・「材料」だけの一覧はなくした（作り方と重なるため）。工程に入っていない材料があるときだけ、作り方の上にまとめて出す
+//   ・材料ごとに「未計算になるか」をバッジで表示。✎ を押すと、材料マスタ・使う工程・記号・下ごしらえを直せる
+//   ・人数・調理時間をAIが推定したときは、その欄の横に「推定」と出す（自分で直すと消える）
 //   ・保存ボタンは、画面上部の固定帯（RecipeImportPage）と、この画面の一番下にある
-// 今回の変更：
-//   ・「料理の写真（表示用）」の欄を追加（AIに読み取らせた写真とは別に、一覧・詳細に表示する写真を選べる）
-//   ・調理時間をAIが推定したときは、その旨を表示（自分で直すと、推定の表示は消える）
-import { useMemo, useRef } from 'react'
-import type { ReactNode } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import type { Draft, DraftIngredient, DraftStep, MasterOption } from '../lib/recipeImport'
 import {
   CATEGORIES,
@@ -484,31 +555,11 @@ import {
 } from '../lib/recipeImport'
 import { DEFAULT_CATEGORY_ORDER } from '../lib/categoryOrder'
 
-// 入力欄の見た目（幅は含めない。幅は使う場所で決める）
-const INPUT_BASE =
-  'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-amber-500 focus:outline-none'
-const INPUT = `w-full ${INPUT_BASE}`
-
-function Field({ label, required, children }: { label: string; required?: boolean; children: ReactNode }) {
-  return (
-    <label className="block">
-      <span className="mb-1 block text-[11px] font-semibold text-gray-500">
-        {label}
-        {required && <span className="ml-1 text-red-500">必須</span>}
-      </span>
-      {children}
-    </label>
-  )
-}
-
-function Card({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="mb-3 rounded-xl bg-white p-3 shadow-sm">
-      <h2 className="mb-2 text-sm font-bold text-gray-900">{title}</h2>
-      {children}
-    </section>
-  )
-}
+// 詳細画面の文字の見た目のまま書き換えられる入力欄（下に点線）
+const INLINE =
+  'min-w-0 border-0 border-b border-dashed border-gray-300 bg-transparent px-0.5 py-0.5 focus:border-amber-500 focus:outline-none focus:ring-0'
+const BOX =
+  'w-full rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-sm focus:border-amber-500 focus:outline-none'
 
 type Props = {
   draft: Draft
@@ -527,6 +578,10 @@ type Props = {
   onClearPhoto: () => void
 }
 
+function EstimatedBadge() {
+  return <span className="ml-0.5 rounded bg-amber-100 px-1 text-[9px] font-bold text-amber-700">AI推定</span>
+}
+
 export default function ImportPreviewEditor({
   draft,
   onChange,
@@ -543,6 +598,7 @@ export default function ImportPreviewEditor({
   onClearPhoto,
 }: Props) {
   const photoInput = useRef<HTMLInputElement>(null)
+  const [openIng, setOpenIng] = useState<string | null>(null) // ✎ で開いている材料
   const masterMap = useMemo(() => new Map(masters.map((m) => [m.id, m])), [masters])
 
   // 材料マスタを、カテゴリごとにまとめる（選択肢の並び用）
@@ -562,381 +618,553 @@ export default function ImportPreviewEditor({
   const setStep = (key: string, patch: Partial<DraftStep>) =>
     set({ steps: draft.steps.map((s) => (s.key === key ? { ...s, ...patch } : s)) })
 
+  const addIngredient = (stepNo: number | null) => {
+    const key = newKey()
+    set({
+      ingredients: [
+        ...draft.ingredients,
+        { key, name: '', masterId: null, quantity: '', unit: '', preparation: '', stepNo, group: '' },
+      ],
+    })
+    setOpenIng(key)
+  }
+
+  // 工程を消す：その工程の材料は「工程に入っていない材料」へ。後ろの工程の番号を詰める
+  const removeStep = (index: number) => {
+    const no = index + 1
+    const s = draft.steps[index]
+    const used = draft.ingredients.filter((i) => i.stepNo === no && i.name.trim() !== '').length
+    const msg = used > 0 ? `工程${no}を削除しますか？（この工程の材料${used}件は「工程に入っていない材料」に移ります）` : `工程${no}を削除しますか？`
+    if ((s.name || s.description || s.tip || used > 0) && !window.confirm(msg)) return
+    set({
+      steps: draft.steps.filter((_, i) => i !== index),
+      ingredients: draft.ingredients.map((i) =>
+        i.stepNo === no ? { ...i, stepNo: null } : i.stepNo != null && i.stepNo > no ? { ...i, stepNo: i.stepNo - 1 } : i,
+      ),
+    })
+  }
+
+  // 工程ごとの材料・工程に入っていない材料（並びは読み取った順）
+  const stepCount = draft.steps.length
+  const byStep = useMemo(() => {
+    const m = new Map<number, DraftIngredient[]>()
+    const loose: DraftIngredient[] = []
+    for (const i of draft.ingredients) {
+      if (i.stepNo != null && i.stepNo >= 1 && i.stepNo <= stepCount) m.set(i.stepNo, [...(m.get(i.stepNo) ?? []), i])
+      else loose.push(i)
+    }
+    return { m, loose }
+  }, [draft.ingredients, stepCount])
+
   // 未計算になる材料の数（名前が空の行は数えない）
   const masterReady = masters.length > 0
-  const unresolved = draft.ingredients.filter(
-    (i) => i.name.trim() !== '' && isUnresolved(rowStatus(i.quantity, i.unit, i.masterId ? masterMap.get(i.masterId) : undefined)),
-  ).length
-  const ingCount = draft.ingredients.filter((i) => i.name.trim() !== '').length
+  const statusOf = (i: DraftIngredient) => rowStatus(i.quantity, i.unit, i.masterId ? masterMap.get(i.masterId) : undefined)
+  const unresolved = draft.ingredients.filter((i) => i.name.trim() !== '' && isUnresolved(statusOf(i))).length
 
   const errorBox = error && (
-    <p className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-600">{error}</p>
+    <p className="mx-3 mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-600">{error}</p>
+  )
+
+  // ---------- 材料1行（詳細画面の工程内の材料と同じ並び：名前／右に分量） ----------
+  const renderIngredient = (ing: DraftIngredient) => {
+    const master = ing.masterId ? masterMap.get(ing.masterId) : undefined
+    const status = statusOf(ing)
+    const info = STATUS_INFO[status]
+    const opened = openIng === ing.key
+    const unitInList = !!master && master.units.map(normUnit).includes(normUnit(ing.unit))
+    const attention = masterReady && ing.name.trim() !== '' && isUnresolved(status)
+
+    return (
+      <li key={ing.key} className="py-1">
+        <div className="flex items-center gap-1.5 text-sm">
+          <input
+            className={`${INLINE} flex-1 text-gray-700`}
+            value={ing.name}
+            placeholder="材料名"
+            onChange={(e) => setIng(ing.key, { name: e.target.value })}
+          />
+          {masterReady && ing.name.trim() !== '' && status !== 'ok' && (
+            <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-bold ${info.cls}`}>{info.label}</span>
+          )}
+          <input
+            className={`${INLINE} w-12 shrink-0 text-right text-gray-500`}
+            value={ing.quantity}
+            placeholder="分量"
+            onChange={(e) => setIng(ing.key, { quantity: e.target.value })}
+          />
+          {master ? (
+            <select
+              className={`${INLINE} w-16 shrink-0 text-gray-500`}
+              value={ing.unit}
+              onChange={(e) => setIng(ing.key, { unit: e.target.value })}
+            >
+              <option value="">（なし）</option>
+              {master.units.map((u) => (
+                <option key={u} value={u}>
+                  {u}
+                </option>
+              ))}
+              {ing.unit !== '' && !unitInList && <option value={ing.unit}>{ing.unit}（登録なし）</option>}
+            </select>
+          ) : (
+            <input
+              className={`${INLINE} w-12 shrink-0 text-gray-500`}
+              value={ing.unit}
+              placeholder="単位"
+              onChange={(e) => setIng(ing.key, { unit: e.target.value })}
+            />
+          )}
+          <button
+            type="button"
+            onClick={() => setOpenIng(opened ? null : ing.key)}
+            aria-label="この材料の詳細を直す"
+            className={`shrink-0 rounded-md px-1.5 py-0.5 text-xs ${
+              opened ? 'bg-amber-500 text-white' : attention ? 'bg-amber-100 text-amber-700' : 'text-gray-400 active:bg-gray-100'
+            }`}
+          >
+            ✎
+          </button>
+        </div>
+        {(ing.preparation || ing.group) && !opened && (
+          <p className="text-[11px] text-gray-400">
+            {ing.group && <span className="mr-1 rounded-full bg-orange-500 px-1.5 text-[10px] font-bold text-white">{ing.group}</span>}
+            {ing.preparation && `(${ing.preparation})`}
+          </p>
+        )}
+
+        {opened && (
+          <div className="mt-1.5 space-y-2 rounded-lg bg-gray-50 p-2">
+            <label className="block">
+              <span className="mb-0.5 block text-[10px] font-semibold text-gray-500">材料マスタ（計算に使う材料）</span>
+              <select
+                className={BOX}
+                value={ing.masterId ?? ''}
+                onChange={(e) => setIng(ing.key, { masterId: e.target.value || null })}
+              >
+                <option value="">（紐付けない → 未計算になります）</option>
+                {grouped.map(([cat, list]) => (
+                  <optgroup key={cat} label={cat}>
+                    {list.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </label>
+            <div className="grid grid-cols-[1fr_auto] gap-2">
+              <label className="block">
+                <span className="mb-0.5 block text-[10px] font-semibold text-gray-500">使う工程</span>
+                <select
+                  className={BOX}
+                  value={ing.stepNo ?? ''}
+                  onChange={(e) => setIng(ing.key, { stepNo: e.target.value === '' ? null : Number(e.target.value) })}
+                >
+                  <option value="">（工程に入れない）</option>
+                  {draft.steps.map((s, i) => (
+                    <option key={s.key} value={i + 1}>
+                      {circled(i + 1)} {s.name || '（工程名なし）'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-0.5 block text-[10px] font-semibold text-gray-500">記号</span>
+                <input
+                  className="w-14 rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-center text-sm focus:border-amber-500 focus:outline-none"
+                  value={ing.group}
+                  maxLength={1}
+                  placeholder="A"
+                  autoCapitalize="characters"
+                  onChange={(e) => setIng(ing.key, { group: e.target.value })}
+                />
+              </label>
+            </div>
+            <label className="block">
+              <span className="mb-0.5 block text-[10px] font-semibold text-gray-500">下ごしらえ（みじん切り など）</span>
+              <input
+                className={BOX}
+                value={ing.preparation}
+                onChange={(e) => setIng(ing.key, { preparation: e.target.value })}
+              />
+            </label>
+            <div className="flex justify-between">
+              <button
+                type="button"
+                onClick={() => {
+                  set({ ingredients: draft.ingredients.filter((i) => i.key !== ing.key) })
+                  setOpenIng(null)
+                }}
+                className="rounded-full border border-red-300 px-3 py-1 text-xs font-bold text-red-500 active:bg-red-50"
+              >
+                🗑 この材料を削除
+              </button>
+              <button
+                type="button"
+                onClick={() => setOpenIng(null)}
+                className="rounded-full bg-gray-200 px-3 py-1 text-xs font-bold text-gray-600"
+              >
+                閉じる
+              </button>
+            </div>
+          </div>
+        )}
+      </li>
+    )
+  }
+
+  const addIngButton = (stepNo: number | null) => (
+    <button
+      type="button"
+      onClick={() => addIngredient(stepNo)}
+      className="mt-0.5 text-[11px] font-semibold text-amber-600 active:opacity-60"
+    >
+      ＋ 材料を追加
+    </button>
   )
 
   return (
-    <div className="p-3">
-      {errorBox}
-
-      {/* AIからの注意 */}
-      {warnings.length > 0 && (
-        <div className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
-          <p className="mb-1 font-bold">⚠️ 読み取りの注意（保存の前に確認してください）</p>
-          <ul className="list-disc space-y-0.5 pl-4">
-            {warnings.map((w, i) => (
-              <li key={i}>{w}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* 料理写真（表示用） */}
-      <Card title="料理の写真（表示用・任意）">
-        <p className="mb-2 text-[11px] leading-relaxed text-gray-400">
-          レシピ一覧・詳細に表示される写真です。AIに読み取らせた写真（料理本のページなど）とは別に選べます。あとから、詳細画面でも変更できます。
-        </p>
-        <input
-          ref={photoInput}
-          type="file"
-          accept="image/*"
-          className="hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0]
-            if (photoInput.current) photoInput.current.value = '' // 同じ写真をもう一度選べるように
-            if (f) onPickPhoto(f)
-          }}
-        />
-        <div className="relative aspect-video overflow-hidden rounded-lg bg-gray-100">
-          {photoUrl ? (
-            <img src={photoUrl} alt="料理の写真" className="h-full w-full object-cover" />
-          ) : (
-            <div className="flex h-full w-full items-center justify-center text-4xl text-gray-300">🍽️</div>
-          )}
-          <div className="absolute bottom-2 right-2 flex gap-1.5">
-            {photoUrl && (
-              <button
-                type="button"
-                onClick={onClearPhoto}
-                disabled={photoBusy}
-                className="rounded-full bg-black/60 px-3 py-1.5 text-xs font-bold text-white active:opacity-80 disabled:opacity-50"
-              >
-                取り除く
-              </button>
-            )}
+    <div className="pb-6">
+      {/* 写真（右下で登録／変更。詳細画面と同じ位置） */}
+      <input
+        ref={photoInput}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (photoInput.current) photoInput.current.value = '' // 同じ写真をもう一度選べるように
+          if (f) onPickPhoto(f)
+        }}
+      />
+      <div className="relative flex h-56 w-full items-center justify-center bg-gray-100">
+        {photoUrl ? (
+          <img src={photoUrl} alt="料理の写真" className="h-full w-full object-cover" />
+        ) : (
+          <div className="text-center text-gray-400">
+            <div className="text-5xl">🍚</div>
+            <p className="mt-1 text-[11px]">料理の写真（任意。読み取りに使った写真とは別）</p>
+          </div>
+        )}
+        <div className="absolute bottom-2 right-2 flex gap-1.5">
+          {photoUrl && (
             <button
               type="button"
-              onClick={() => photoInput.current?.click()}
+              onClick={onClearPhoto}
               disabled={photoBusy}
               className="rounded-full bg-black/60 px-3 py-1.5 text-xs font-bold text-white active:opacity-80 disabled:opacity-50"
             >
-              {photoBusy ? '変換中…' : photoUrl ? '📷 変更' : '📷 登録'}
+              取り除く
             </button>
-          </div>
-        </div>
-        {photoError && <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{photoError}</p>}
-      </Card>
-
-      {/* 基本情報 */}
-      <Card title="基本情報">
-        <div className="space-y-2.5">
-          <Field label="料理名" required>
-            <input className={INPUT} value={draft.dishName} onChange={(e) => set({ dishName: e.target.value })} />
-          </Field>
-
-          <div className="grid grid-cols-[1fr_auto] gap-2">
-            <Field label="参考元（人の名前・本・サイトなど）" required>
-              <input
-                className={INPUT}
-                value={draft.sourceName}
-                placeholder="例：リュウジ／自作"
-                onChange={(e) => set({ sourceName: e.target.value })}
-              />
-            </Field>
-            <Field label="種別">
-              <select className={INPUT} value={draft.sourceType} onChange={(e) => set({ sourceType: e.target.value })}>
-                {SOURCE_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          </div>
-
-          <Field label="参考URL（あれば）">
-            <input
-              className={INPUT}
-              value={draft.sourceUrl}
-              inputMode="url"
-              autoCapitalize="off"
-              placeholder="https://…"
-              onChange={(e) => set({ sourceUrl: e.target.value })}
-            />
-          </Field>
-
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="ジャンル">
-              <select className={INPUT} value={draft.genre} onChange={(e) => set({ genre: e.target.value })}>
-                {GENRES.map((g) => (
-                  <option key={g} value={g}>
-                    {g}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="サブカテゴリ">
-              <select className={INPUT} value={draft.category} onChange={(e) => set({ category: e.target.value })}>
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="何人前の分量か" required>
-              <input
-                className={INPUT}
-                value={draft.servings}
-                inputMode="numeric"
-                onChange={(e) => set({ servings: e.target.value })}
-              />
-            </Field>
-            <Field label="調理時間（分）">
-              <input
-                className={INPUT}
-                value={draft.cookingTime}
-                inputMode="numeric"
-                placeholder="わからなければ空欄"
-                onChange={(e) => set({ cookingTime: e.target.value, cookingTimeEstimated: false })}
-              />
-            </Field>
-          </div>
-          {draft.cookingTimeEstimated && (
-            <p className="-mt-1 rounded-lg bg-amber-50 px-3 py-1.5 text-[11px] text-amber-800">
-              ✨ 調理時間は、AIが材料と工程から推定した目安です（直すと、この表示は消えます）。
-            </p>
           )}
-        </div>
-      </Card>
-
-      {/* 材料 */}
-      <Card title={`材料（${ingCount}件）`}>
-        {masterReady ? (
-          <p
-            className={`mb-2 rounded-lg px-3 py-2 text-xs leading-relaxed ${
-              unresolved === 0 ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-800'
-            }`}
+          <button
+            type="button"
+            onClick={() => photoInput.current?.click()}
+            disabled={photoBusy}
+            className="rounded-full bg-black/60 px-3 py-1.5 text-xs font-bold text-white active:opacity-80 disabled:opacity-50"
           >
-            {unresolved === 0
-              ? '✅ すべての材料が、カロリー・費用の計算に使えます。'
-              : `⚠️ ${unresolved}件が「未計算」になります。材料マスタを選び直すか、単位を直してください。`}
+            {photoBusy ? '変換中…' : photoUrl ? '📷 変更' : '📷 登録'}
+          </button>
+        </div>
+      </div>
+      {photoError && <p className="mx-3 mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{photoError}</p>}
+
+      {/* 料理名 ＋ 参考元・時間・標準の人前（詳細画面の上の帯と同じ並び） */}
+      <div className="border-b border-gray-200 bg-white px-3 pb-2.5 pt-2">
+        <input
+          className={`${INLINE} w-full text-lg font-bold leading-tight text-gray-900`}
+          value={draft.dishName}
+          placeholder="料理名（必須）"
+          onChange={(e) => set({ dishName: e.target.value })}
+        />
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-gray-500">
+          <input
+            className={`${INLINE} w-28`}
+            value={draft.sourceName}
+            placeholder="参考元（必須）"
+            onChange={(e) => set({ sourceName: e.target.value })}
+          />
+          <span className="flex items-center">
+            ⏱
+            <input
+              className={`${INLINE} ml-0.5 w-9 text-right`}
+              value={draft.cookingTime}
+              inputMode="numeric"
+              placeholder="―"
+              onChange={(e) => set({ cookingTime: e.target.value, cookingTimeEstimated: false })}
+            />
+            分{draft.cookingTimeEstimated && <EstimatedBadge />}
+          </span>
+          <span className="flex items-center">
+            標準
+            <input
+              className={`${INLINE} mx-0.5 w-7 text-center`}
+              value={draft.servings}
+              inputMode="numeric"
+              onChange={(e) => set({ servings: e.target.value, servingsEstimated: false })}
+            />
+            人前{draft.servingsEstimated && <EstimatedBadge />}
+          </span>
+        </div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-gray-400">
+          <select
+            className={`${INLINE} text-gray-500`}
+            value={draft.genre}
+            onChange={(e) => set({ genre: e.target.value })}
+            aria-label="ジャンル"
+          >
+            {GENRES.map((g) => (
+              <option key={g} value={g}>
+                {g}
+              </option>
+            ))}
+          </select>
+          ・
+          <select
+            className={`${INLINE} text-gray-500`}
+            value={draft.category}
+            onChange={(e) => set({ category: e.target.value })}
+            aria-label="サブカテゴリ"
+          >
+            {CATEGORIES.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </div>
+        {(draft.servingsEstimated || draft.cookingTimeEstimated) && (
+          <p className="mt-1.5 text-[10px] leading-relaxed text-amber-700">
+            「AI推定」は、書かれていなかったためAIが推定した目安です（標準の人前は材料の分量から、時間は工程から）。直すと消えます。
           </p>
+        )}
+      </div>
+
+      <div className="p-3">
+        {errorBox}
+
+        {/* AIからの注意 */}
+        {warnings.length > 0 && (
+          <div className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
+            <p className="mb-1 font-bold">⚠️ 読み取りの注意（保存の前に確認してください）</p>
+            <ul className="list-disc space-y-0.5 pl-4">
+              {warnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* 計算の状態 */}
+        {masterReady ? (
+          unresolved > 0 && (
+            <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
+              ⚠️ {unresolved}件の材料が「未計算」になります。材料の ✎ から、材料マスタや単位を直せます。
+            </p>
+          )
         ) : (
-          <p className="mb-2 rounded-lg bg-gray-100 px-3 py-2 text-xs text-gray-500">
+          <p className="mb-3 rounded-lg bg-gray-100 px-3 py-2 text-xs text-gray-500">
             {mastersError
               ? `材料マスタを読み込めませんでした（${mastersError}）。未計算の判定は表示できません。`
               : '材料マスタを読み込み中…'}
           </p>
         )}
 
-        <ul className="space-y-2">
-          {draft.ingredients.map((ing) => {
-            const master = ing.masterId ? masterMap.get(ing.masterId) : undefined
-            const status = rowStatus(ing.quantity, ing.unit, master)
-            const info = STATUS_INFO[status]
-            const needsAttention = masterReady && isUnresolved(status)
-            const unitInList = !!master && master.units.map(normUnit).includes(normUnit(ing.unit))
+        {/* 工程に入っていない材料（あるときだけ） */}
+        {byStep.loose.length > 0 && (
+          <section className="mb-3 rounded-xl bg-white p-3 shadow-sm">
+            <h2 className="text-sm font-semibold text-gray-800">工程に入っていない材料</h2>
+            <p className="text-[10px] text-gray-400">✎ の「使う工程」で、工程に入れられます（入れなくても保存できます）</p>
+            <ul className="mt-1 divide-y divide-gray-100">{byStep.loose.map(renderIngredient)}</ul>
+            {addIngButton(null)}
+          </section>
+        )}
 
-            return (
-              <li key={ing.key} className="rounded-lg border border-gray-200 p-2.5">
-                <div className="flex items-center gap-2">
-                  <input
-                    className={`${INPUT_BASE} min-w-0 flex-1`}
-                    value={ing.name}
-                    placeholder="材料名"
-                    onChange={(e) => setIng(ing.key, { name: e.target.value })}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => set({ ingredients: draft.ingredients.filter((i) => i.key !== ing.key) })}
-                    aria-label="この材料を削除"
-                    className="shrink-0 rounded-lg border border-gray-300 px-2.5 py-2 text-sm active:bg-gray-100"
-                  >
-                    🗑
-                  </button>
-                </div>
-
-                <div className="mt-1.5 flex items-center gap-2">
-                  <input
-                    className={`${INPUT_BASE} w-20 shrink-0`}
-                    value={ing.quantity}
-                    placeholder="分量"
-                    onChange={(e) => setIng(ing.key, { quantity: e.target.value })}
-                  />
-                  {master ? (
-                    <select
-                      className={`${INPUT_BASE} w-28 shrink-0`}
-                      value={ing.unit}
-                      onChange={(e) => setIng(ing.key, { unit: e.target.value })}
-                    >
-                      <option value="">（単位なし）</option>
-                      {master.units.map((u) => (
-                        <option key={u} value={u}>
-                          {u}
-                        </option>
-                      ))}
-                      {ing.unit !== '' && !unitInList && <option value={ing.unit}>{ing.unit}（登録なし）</option>}
-                    </select>
-                  ) : (
-                    <input
-                      className={`${INPUT_BASE} w-28 shrink-0`}
-                      value={ing.unit}
-                      placeholder="単位"
-                      onChange={(e) => setIng(ing.key, { unit: e.target.value })}
-                    />
-                  )}
-                  {masterReady && ing.name.trim() !== '' && (
-                    <span className={`min-w-0 truncate rounded px-1.5 py-0.5 text-[11px] font-bold ${info.cls}`}>
-                      {info.label}
+        {/* 作り方（詳細画面の工程カードと同じ見た目） */}
+        <section>
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="font-semibold text-gray-800">作り方</h2>
+            {byStep.loose.length === 0 && (
+              <button
+                type="button"
+                onClick={() => addIngredient(null)}
+                className="text-[11px] font-semibold text-gray-400 active:opacity-60"
+              >
+                ＋ 工程に入れない材料
+              </button>
+            )}
+          </div>
+          <ol className="space-y-3">
+            {draft.steps.map((step, idx) => {
+              const no = idx + 1
+              const list = byStep.m.get(no) ?? []
+              return (
+                <li key={step.key} className="rounded-xl bg-white p-3 shadow-sm">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-500 text-xs font-semibold text-white">
+                      {no}
                     </span>
-                  )}
-                </div>
-
-                <details open={needsAttention} className="mt-1.5">
-                  <summary className="cursor-pointer text-[11px] font-semibold text-gray-500">
-                    詳細（マスタ・工程・記号・下ごしらえ）
-                  </summary>
-                  <div className="mt-1.5 space-y-2">
-                    <Field label="材料マスタ（計算に使う材料）">
-                      <select
-                        className={INPUT}
-                        value={ing.masterId ?? ''}
-                        onChange={(e) => setIng(ing.key, { masterId: e.target.value || null })}
-                      >
-                        <option value="">（紐付けない → 未計算になります）</option>
-                        {grouped.map(([cat, list]) => (
-                          <optgroup key={cat} label={cat}>
-                            {list.map((m) => (
-                              <option key={m.id} value={m.id}>
-                                {m.name}
-                              </option>
-                            ))}
-                          </optgroup>
-                        ))}
-                      </select>
-                    </Field>
-
-                    <div className="grid grid-cols-[1fr_auto] gap-2">
-                      <Field label="使う工程">
-                        <select
-                          className={INPUT}
-                          value={ing.stepNo ?? ''}
-                          onChange={(e) => setIng(ing.key, { stepNo: e.target.value === '' ? null : Number(e.target.value) })}
-                        >
-                          <option value="">（工程に紐付けない）</option>
-                          {draft.steps.map((s, i) => (
-                            <option key={s.key} value={i + 1}>
-                              {circled(i + 1)} {s.name || '（工程名なし）'}
-                            </option>
-                          ))}
-                        </select>
-                      </Field>
-                      <Field label="記号">
-                        <input
-                          className={`${INPUT_BASE} w-16 text-center`}
-                          value={ing.group}
-                          maxLength={1}
-                          placeholder="A"
-                          autoCapitalize="characters"
-                          onChange={(e) => setIng(ing.key, { group: e.target.value })}
-                        />
-                      </Field>
-                    </div>
-
-                    <Field label="下ごしらえ（みじん切り など）">
-                      <input
-                        className={INPUT}
-                        value={ing.preparation}
-                        onChange={(e) => setIng(ing.key, { preparation: e.target.value })}
-                      />
-                    </Field>
+                    <input
+                      className={`${INLINE} flex-1 text-sm font-medium text-gray-800`}
+                      value={step.name}
+                      placeholder="工程名（例：下ごしらえ）"
+                      onChange={(e) => setStep(step.key, { name: e.target.value })}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeStep(idx)}
+                      aria-label={`工程${no}を削除`}
+                      className="shrink-0 rounded-md px-1.5 py-0.5 text-xs text-gray-300 active:bg-gray-100"
+                    >
+                      🗑
+                    </button>
                   </div>
-                </details>
-              </li>
-            )
-          })}
-        </ul>
+
+                  <div className="mb-1 pl-8">
+                    {list.length > 0 && <ul className="divide-y divide-gray-100">{list.map(renderIngredient)}</ul>}
+                    {addIngButton(no)}
+                  </div>
+
+                  <div className="flex gap-1 pl-8">
+                    <span className="mt-1 shrink-0 text-sm font-bold text-amber-500">→</span>
+                    <textarea
+                      className="min-w-0 flex-1 resize-y rounded-md border border-dashed border-gray-300 bg-transparent px-1.5 py-1 text-sm leading-relaxed text-gray-600 focus:border-amber-500 focus:outline-none"
+                      rows={3}
+                      value={step.description}
+                      placeholder="作り方の本文（[A] と書くと、記号Aの材料を指します）"
+                      onChange={(e) => setStep(step.key, { description: e.target.value })}
+                    />
+                  </div>
+
+                  <div className="ml-8 mt-2 flex items-center gap-1 rounded-lg bg-yellow-50 px-2 py-1.5 text-xs text-yellow-800">
+                    <span className="shrink-0 font-bold">💡 POINT</span>
+                    <input
+                      className={`${INLINE} flex-1 border-yellow-300 text-yellow-800 placeholder:text-yellow-600/50`}
+                      value={step.tip}
+                      placeholder="コツ（無ければ空欄）"
+                      onChange={(e) => setStep(step.key, { tip: e.target.value })}
+                    />
+                  </div>
+                </li>
+              )
+            })}
+          </ol>
+          <button
+            type="button"
+            onClick={() => set({ steps: [...draft.steps, { key: newKey(), name: '', description: '', tip: '' }] })}
+            className="mt-2 w-full rounded-lg border border-dashed border-gray-300 bg-white py-2 text-sm font-semibold text-gray-500 active:bg-gray-50"
+          >
+            ＋ 工程を追加
+          </button>
+        </section>
+
+        {/* 参考元の種別・URL（詳細画面の一番下の「参考元」と同じ位置） */}
+        <section className="mt-5 space-y-1.5 text-xs text-gray-500">
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 text-gray-400">参考元の種類</span>
+            <select
+              className={`${INLINE} text-gray-600`}
+              value={draft.sourceType}
+              onChange={(e) => set({ sourceType: e.target.value })}
+            >
+              {SOURCE_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 text-gray-400">参考URL</span>
+            <input
+              className={`${INLINE} flex-1 text-gray-600`}
+              value={draft.sourceUrl}
+              inputMode="url"
+              autoCapitalize="off"
+              placeholder="https://…（あれば）"
+              onChange={(e) => set({ sourceUrl: e.target.value })}
+            />
+          </div>
+          <p className="text-[10px] text-gray-400">
+            工程名・本文・POINTがすべて空の工程と、名前が空の材料は、保存するときに取り除かれます。
+          </p>
+        </section>
+
+        <div className="mt-4">{errorBox}</div>
 
         <button
           type="button"
-          onClick={() =>
-            set({
-              ingredients: [
-                ...draft.ingredients,
-                { key: newKey(), name: '', masterId: null, quantity: '', unit: '', preparation: '', stepNo: null, group: '' },
-              ],
-            })
-          }
-          className="mt-2 w-full rounded-lg border border-dashed border-gray-300 py-2 text-sm font-semibold text-gray-500 active:bg-gray-50"
+          onClick={onSave}
+          disabled={saving}
+          className="w-full rounded-xl bg-amber-500 py-3.5 text-base font-bold text-white active:opacity-80 disabled:bg-gray-300"
         >
-          ＋ 材料を追加
+          {saving ? '保存中…' : 'このレシピを保存する'}
         </button>
-      </Card>
+      </div>
+    </div>
+  )
+}
 
-      {/* 作り方 */}
-      <Card title={`作り方（${draft.steps.length}工程）`}>
-        <ol className="space-y-2">
-          {draft.steps.map((s, i) => (
-            <li key={s.key} className="rounded-lg border border-gray-200 p-2.5">
-              <div className="flex items-center gap-2">
-                <span className="shrink-0 text-lg font-bold leading-none text-amber-600">{circled(i + 1)}</span>
-                <input
-                  className={INPUT}
-                  value={s.name}
-                  placeholder="工程名（例：下ごしらえ）"
-                  onChange={(e) => setStep(s.key, { name: e.target.value })}
-                />
-              </div>
-              <textarea
-                className={`${INPUT} mt-1.5`}
-                rows={3}
-                value={s.description}
-                placeholder="作り方の本文（[A] と書くと、グループ記号Aの材料を指します）"
-                onChange={(e) => setStep(s.key, { description: e.target.value })}
-              />
-              <input
-                className={`${INPUT} mt-1.5`}
-                value={s.tip}
-                placeholder="💡 POINT（コツ。無ければ空欄）"
-                onChange={(e) => setStep(s.key, { tip: e.target.value })}
-              />
-            </li>
-          ))}
-        </ol>
-        <p className="mt-2 text-[11px] leading-relaxed text-gray-400">
-          工程名・本文・POINTをすべて空にした工程は、保存するときに取り除かれます。
-        </p>
-        <button
-          type="button"
-          onClick={() => set({ steps: [...draft.steps, { key: newKey(), name: '', description: '', tip: '' }] })}
-          className="mt-2 w-full rounded-lg border border-dashed border-gray-300 py-2 text-sm font-semibold text-gray-500 active:bg-gray-50"
-        >
-          ＋ 工程を追加
-        </button>
-      </Card>
 
-      {errorBox}
-
-      <button
-        type="button"
-        onClick={onSave}
-        disabled={saving}
-        className="mb-6 w-full rounded-xl bg-amber-500 py-3.5 text-base font-bold text-white active:opacity-80 disabled:bg-gray-300"
+===== src\components\IngredientActionSheet.tsx =====
+// src/components/IngredientActionSheet.tsx（新規作成）
+// 材料を長押ししたときに下から出る、「編集」か「この材料を使うレシピを探す」を選ぶ画面
+export default function IngredientActionSheet({
+  name,
+  category,
+  onEdit,
+  onFindRecipes,
+  onClose,
+}: {
+  name: string
+  category: string
+  onEdit: () => void
+  onFindRecipes: () => void
+  onClose: () => void
+}) {
+  return (
+    <div className="fixed inset-0 z-[60] flex items-end bg-black/40 sm:items-center sm:justify-center" onClick={onClose}>
+      <div
+        className="w-full rounded-t-2xl bg-white px-4 pt-4 sm:max-w-sm sm:rounded-2xl"
+        style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
+        onClick={(e) => e.stopPropagation()}
       >
-        {saving ? '保存中…' : 'このレシピを保存する'}
-      </button>
+        <p className="text-[11px] text-gray-400">{category}</p>
+        <h3 className="mb-3 truncate text-base font-bold text-gray-900">{name}</h3>
+
+        <button
+          type="button"
+          onClick={onEdit}
+          className="mb-2 flex w-full items-center gap-3 rounded-xl border border-gray-200 px-4 py-3 text-left active:bg-gray-50"
+        >
+          <span className="text-xl">✏️</span>
+          <span>
+            <span className="block text-sm font-bold text-gray-900">編集</span>
+            <span className="block text-[11px] text-gray-400">栄養素・価格・旬・単位を直す（AIで再取得もできます）</span>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onFindRecipes}
+          className="mb-2 flex w-full items-center gap-3 rounded-xl border border-gray-200 px-4 py-3 text-left active:bg-gray-50"
+        >
+          <span className="text-xl">🍳</span>
+          <span>
+            <span className="block text-sm font-bold text-gray-900">この材料を使うレシピを探す</span>
+            <span className="block text-[11px] text-gray-400">この材料が入っているレシピの一覧を見る</span>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onClose}
+          className="mt-1 w-full rounded-xl bg-gray-100 py-3 text-sm font-bold text-gray-600 active:bg-gray-200"
+        >
+          キャンセル
+        </button>
+      </div>
     </div>
   )
 }
@@ -944,10 +1172,12 @@ export default function ImportPreviewEditor({
 ===== src\components\IngredientRegisterStep.tsx =====
 // src/components/IngredientRegisterStep.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 今回の変更：栄養素を3列で表示（カードの端まで幅を使う）／栄養素の「入力済み／空欄」の数を表示
-// レシピ取り込みの「材料の登録」画面の中身
-//   ・AIが読み取ったレシピに、材料マスタに無い材料（や、マスタに無い単位）があるとき、確認・修正の前に表示する
-//   ・栄養素・カロリー・価格・旬・単位（1単位が何gか）は、AIが推定した値が入っている。直してから登録できる
-//   ・名前が同じ意味の材料がすでにあるときは、「既存の材料にまとめる」で選ぶ（二重に登録しない）
+// 「材料の登録・編集」画面の中身（3つの使い方で共通）
+//   ・variant="recipe"：レシピ取り込み。AIが読み取ったレシピに、材料マスタに無い材料（や単位）があるとき、確認・修正の前に表示する
+//   ・variant="master"：材料ページの「材料を追加」。入力した材料名を、AIで分析して登録する
+//   ・variant="edit"  ：材料ページの「編集」。今の値が入っている。「AIで再取得」で、AIの推定値に置き換えられる
+//   ・栄養素・カロリー・価格・旬・単位（1単位が何gか）は、AIが推定した値が入っている。直してから登録・保存できる
+//   ・名前が同じ意味の材料がすでにあるときは、「既存の材料にまとめる」で選ぶ（レシピ取り込みのみ。二重に登録しない）
 import { useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
@@ -957,6 +1187,7 @@ import type { RegisterPlan, RegItem, RegUnit, UnitAddItem } from '../lib/ingredi
 import { CATEGORY_OPTIONS, NUTRIENTS, similarMasters } from '../lib/ingredientRegister'
 
 export type AiStatus = 'analyzing' | 'ready' | 'failed'
+export type RegisterVariant = 'recipe' | 'master' | 'edit'
 
 const INPUT_BASE =
   'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-amber-500 focus:outline-none'
@@ -987,7 +1218,10 @@ type Props = {
   saving: boolean
   error: string | null
   onApply: () => void
-  onSkip: () => void
+  onSkip?: () => void // レシピ取り込みのときだけ
+  variant?: RegisterVariant // 既定は recipe
+  onRefetch?: (key: string) => void // 編集のとき：「AIで再取得」
+  refetchingKey?: string | null
 }
 
 export default function IngredientRegisterStep({
@@ -1002,6 +1236,9 @@ export default function IngredientRegisterStep({
   error,
   onApply,
   onSkip,
+  variant = 'recipe',
+  onRefetch,
+  refetchingKey = null,
 }: Props) {
   // 材料マスタを、カテゴリごとにまとめる（「既存の材料にまとめる」の選択肢）
   const grouped = useMemo(() => {
@@ -1023,6 +1260,15 @@ export default function IngredientRegisterStep({
   const linkCount = plan.items.filter((i) => i.checked && i.linkTo).length
   const unitCount = plan.unitAdds.filter((u) => u.checked).length
   const total = newCount + linkCount + unitCount
+  const applyLabel =
+    variant === 'edit'
+      ? '保存する'
+      : variant === 'master'
+        ? `登録する（${newCount}件）`
+        : total > 0
+          ? `登録して次へ（${total}件）`
+          : 'このまま次へ'
+  const busyLabel = variant === 'edit' ? '保存中…' : '登録中…'
 
   const errorBox = error && (
     <p className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-600">{error}</p>
@@ -1037,16 +1283,36 @@ export default function IngredientRegisterStep({
       </datalist>
 
       <div className="mb-3 rounded-xl bg-white p-3 shadow-sm">
-        <h2 className="text-sm font-bold text-gray-900">🥕 材料マスタに無い材料があります</h2>
-        <p className="mt-1 text-xs leading-relaxed text-gray-500">
-          カロリー・費用は、材料マスタの値から計算します。先にここで登録しておくと、このレシピも計算できます。栄養素・価格・旬・単位は、AIが推定した目安です（食品成分表の値とは少し違うことがあります）。内容を確認してから登録してください。
-        </p>
+        {variant === 'recipe' && (
+          <>
+            <h2 className="text-sm font-bold text-gray-900">🥕 材料マスタに無い材料があります</h2>
+            <p className="mt-1 text-xs leading-relaxed text-gray-500">
+              カロリー・費用は、材料マスタの値から計算します。先にここで登録しておくと、このレシピも計算できます。栄養素・価格・旬・単位は、AIが推定した目安です（食品成分表の値とは少し違うことがあります）。内容を確認してから登録してください。
+            </p>
+          </>
+        )}
+        {variant === 'master' && (
+          <>
+            <h2 className="text-sm font-bold text-gray-900">✨ AIが推定した内容を確認してください</h2>
+            <p className="mt-1 text-xs leading-relaxed text-gray-500">
+              栄養素・価格・旬・単位は、AIが推定した目安です（食品成分表の値とは少し違うことがあります）。直してから登録できます。チェックを外した材料は、登録しません。
+            </p>
+          </>
+        )}
+        {variant === 'edit' && (
+          <>
+            <h2 className="text-sm font-bold text-gray-900">✏️ 材料を編集</h2>
+            <p className="mt-1 text-xs leading-relaxed text-gray-500">
+              内容を直して、「保存する」を押してください。「AIで再取得」を押すと、栄養素・価格・旬・単位を、AIの推定値に置き換えられます。
+            </p>
+          </>
+        )}
       </div>
 
       {errorBox}
 
       {/* AIの分析状況 */}
-      {aiStatus === 'analyzing' && (
+      {aiStatus === 'analyzing' && variant !== 'edit' && (
         <div className="mb-3 rounded-xl bg-amber-50 p-4 text-sm text-amber-800">
           <p className="font-bold">✨ AIが、栄養素・価格・単位を分析中です…（10〜30秒ほど）</p>
           <ul className="mt-2 list-disc pl-5 text-xs">
@@ -1062,7 +1328,7 @@ export default function IngredientRegisterStep({
         </div>
       )}
 
-      {aiStatus === 'failed' && (
+      {aiStatus === 'failed' && variant !== 'edit' && (
         <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-600">
           <p>AIの分析に失敗しました：{aiError}</p>
           {aiErrorCode === 'NO_API_KEY' && (
@@ -1086,10 +1352,23 @@ export default function IngredientRegisterStep({
           {/* 新しく登録する材料 */}
           {plan.items.length > 0 && (
             <section className="mb-3">
-              <h3 className="mb-2 px-1 text-sm font-bold text-gray-900">新しく登録する材料（{plan.items.length}件）</h3>
+              {variant !== 'edit' && (
+                <h3 className="mb-2 px-1 text-sm font-bold text-gray-900">
+                  {variant === 'master' ? '登録する材料' : '新しく登録する材料'}（{plan.items.length}件）
+                </h3>
+              )}
               <ul className="space-y-3">
                 {plan.items.map((it) => (
-                  <ItemCard key={it.key} it={it} masters={masters} grouped={grouped} onPatch={(p) => patchItem(it.key, p)} />
+                  <ItemCard
+                    key={it.key}
+                    it={it}
+                    masters={masters}
+                    grouped={grouped}
+                    variant={variant}
+                    refetching={refetchingKey === it.key}
+                    onRefetch={onRefetch ? () => onRefetch(it.key) : undefined}
+                    onPatch={(p) => patchItem(it.key, p)}
+                  />
                 ))}
               </ul>
             </section>
@@ -1141,19 +1420,23 @@ export default function IngredientRegisterStep({
       <button
         type="button"
         onClick={onApply}
-        disabled={saving || aiStatus === 'analyzing'}
-        className="w-full rounded-xl bg-amber-500 py-3.5 text-base font-bold text-white active:opacity-80 disabled:bg-gray-300"
+        disabled={saving || aiStatus === 'analyzing' || refetchingKey !== null || (variant === 'master' && newCount === 0)}
+        className={`w-full rounded-xl bg-amber-500 py-3.5 text-base font-bold text-white active:opacity-80 disabled:bg-gray-300 ${
+          onSkip ? '' : 'mb-6'
+        }`}
       >
-        {saving ? '登録中…' : total > 0 ? `登録して次へ（${total}件）` : 'このまま次へ'}
+        {saving ? busyLabel : applyLabel}
       </button>
-      <button
-        type="button"
-        onClick={onSkip}
-        disabled={saving}
-        className="mb-6 mt-2 w-full rounded-xl border border-gray-300 bg-white py-3 text-sm font-bold text-gray-600 active:bg-gray-50 disabled:opacity-50"
-      >
-        登録せずに進む（これらの材料は「未計算」になります）
-      </button>
+      {onSkip && (
+        <button
+          type="button"
+          onClick={onSkip}
+          disabled={saving}
+          className="mb-6 mt-2 w-full rounded-xl border border-gray-300 bg-white py-3 text-sm font-bold text-gray-600 active:bg-gray-50 disabled:opacity-50"
+        >
+          登録せずに進む（これらの材料は「未計算」になります）
+        </button>
+      )}
     </div>
   )
 }
@@ -1163,15 +1446,22 @@ function ItemCard({
   it,
   masters,
   grouped,
+  variant,
+  refetching,
+  onRefetch,
   onPatch,
 }: {
   it: RegItem
   masters: MasterOption[]
   grouped: (readonly [string, MasterOption[]])[]
+  variant: RegisterVariant
+  refetching: boolean
+  onRefetch?: () => void
   onPatch: (p: Partial<RegItem>) => void
 }) {
-  const similar = useMemo(() => similarMasters(it.name, masters), [it.name, masters])
-  const linked = it.linkTo !== ''
+  const similar = useMemo(() => (variant === 'recipe' ? similarMasters(it.name, masters) : []), [variant, it.name, masters])
+  const isEdit = variant === 'edit'
+  const linked = variant === 'recipe' && it.linkTo !== ''
   const disabled = !it.checked
   const filledCount = NUTRIENTS.filter((n) => it.nutrients[n.col].trim() !== '').length
 
@@ -1193,13 +1483,15 @@ function ItemCard({
     <li className={`rounded-xl bg-white p-3 shadow-sm ${disabled ? 'opacity-60' : ''}`}>
       {/* 1行目：登録する／名前 */}
       <div className="flex items-center gap-2">
-        <input
-          type="checkbox"
-          checked={it.checked}
-          onChange={(e) => onPatch({ checked: e.target.checked })}
-          aria-label="この材料を登録する"
-          className="h-4 w-4 shrink-0"
-        />
+        {!isEdit && (
+          <input
+            type="checkbox"
+            checked={it.checked}
+            onChange={(e) => onPatch({ checked: e.target.checked })}
+            aria-label="この材料を登録する"
+            className="h-4 w-4 shrink-0"
+          />
+        )}
         <input
           className={`${INPUT_BASE} min-w-0 flex-1 font-bold`}
           value={it.name}
@@ -1207,9 +1499,26 @@ function ItemCard({
           onChange={(e) => onPatch({ name: e.target.value })}
         />
       </div>
-      <p className="mt-1 pl-6 text-[11px] text-gray-400">レシピでの使い方：{it.usage || '（分量なし）'}</p>
+      {variant === 'recipe' && (
+        <p className="mt-1 pl-6 text-[11px] text-gray-400">レシピでの使い方：{it.usage || '（分量なし）'}</p>
+      )}
 
-      {/* 既存の材料にまとめる */}
+      {/* 編集：AIで再取得 */}
+      {isEdit && onRefetch && (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={onRefetch}
+            disabled={refetching}
+            className="w-full rounded-lg border border-amber-400 bg-amber-50 py-2 text-sm font-bold text-amber-700 active:bg-amber-100 disabled:opacity-60"
+          >
+            {refetching ? '✨ AIが分析中…（10〜30秒ほど）' : '✨ AIで再取得（栄養素・価格・旬・単位）'}
+          </button>
+        </div>
+      )}
+
+      {/* 既存の材料にまとめる（レシピ取り込みのときだけ） */}
+      {variant === 'recipe' && (
       <div className="mt-2 pl-6">
         <Field label="すでに同じ材料があるときは、ここで選ぶ（二重に登録しません）">
           <select className={INPUT} value={it.linkTo} disabled={disabled} onChange={(e) => onPatch({ linkTo: e.target.value })}>
@@ -1240,9 +1549,10 @@ function ItemCard({
           </p>
         )}
       </div>
+      )}
 
       {!linked && (
-        <div className={`mt-3 space-y-3 pl-6 ${disabled ? 'pointer-events-none' : ''}`}>
+        <div className={`mt-3 space-y-3 ${variant === 'recipe' ? 'pl-6' : ''} ${disabled || refetching ? 'pointer-events-none' : ''} ${refetching ? 'opacity-50' : ''}`}>
           {it.warnings.length > 0 && (
             <ul className="list-disc space-y-0.5 rounded-lg bg-amber-50 py-2 pl-6 pr-3 text-[11px] leading-relaxed text-amber-800">
               {it.warnings.map((w, i) => (
@@ -1271,7 +1581,20 @@ function ItemCard({
             <p className="mb-1 text-[11px] font-semibold text-gray-500">単位（1単位が何gか）　● ＝ 基準の単位</p>
             {it.units.length === 0 && <p className="mb-1 text-[11px] text-gray-400">単位なし（gで計算します）</p>}
             <ul className="space-y-1.5">
-              {it.units.map((u) => (
+              {it.units.map((u) => u.fixed ? (
+                <li key={u.key} className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setDefault(u.key)}
+                    aria-label="gを基準にする"
+                    className={`h-9 w-9 shrink-0 rounded-lg border text-base ${u.isDefault ? 'border-amber-500 text-amber-600' : 'border-gray-300 text-gray-300'}`}
+                  >
+                    {u.isDefault ? '●' : '○'}
+                  </button>
+                  <span className="w-20 shrink-0 px-3 text-sm font-medium text-gray-800">g</span>
+                  <span className="min-w-0 flex-1 text-xs text-gray-400">1 ＝ 1 g（固定）</span>
+                </li>
+              ) : (
                 <li key={u.key} className="flex items-center gap-1.5">
                   <button
                     type="button"
@@ -1319,8 +1642,39 @@ function ItemCard({
             </button>
           </div>
 
+          {/* 銘柄・いつもの商品・購入店・メモ */}
+          <details className={variant === 'recipe' ? '-ml-6' : ''}>
+            <summary className="cursor-pointer text-xs font-semibold text-gray-600">
+              銘柄・いつもの商品・購入店・メモ
+              {(it.brand || it.product || it.store || it.note) && (
+                <span className="ml-1 font-normal text-gray-400">（入力あり）</span>
+              )}
+            </summary>
+            <div className="mt-2 space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="銘柄（調味料など）">
+                  <input className={INPUT} value={it.brand} onChange={(e) => onPatch({ brand: e.target.value })} />
+                </Field>
+                <Field label="購入店">
+                  <input className={INPUT} value={it.store} onChange={(e) => onPatch({ store: e.target.value })} />
+                </Field>
+              </div>
+              <Field label="いつもの商品名">
+                <input className={INPUT} value={it.product} onChange={(e) => onPatch({ product: e.target.value })} />
+              </Field>
+              <Field label="メモ">
+                <textarea
+                  className={INPUT}
+                  rows={2}
+                  value={it.note}
+                  onChange={(e) => onPatch({ note: e.target.value })}
+                />
+              </Field>
+            </div>
+          </details>
+
           {/* 栄養素・旬（左の字下げを打ち消して、カードの幅いっぱいに3列で並べる） */}
-          <details className="-ml-6">
+          <details className={variant === 'recipe' ? '-ml-6' : ''}>
             <summary className="cursor-pointer text-xs font-semibold text-gray-600">
               栄養素（100gあたり）・旬を確認する
               <span className="ml-1 font-normal text-gray-400">
@@ -1895,6 +2249,442 @@ export default function LoginPage() {
     </div>
   )
 }
+===== src\components\LongPressArea.tsx =====
+// src/components/LongPressArea.tsx（新規作成）
+// 「タップ」と「長押し」を見分ける、クリックできる領域
+//   ・約0.5秒押し続けると onLongPress を呼ぶ（そのあとの「指を離したときのタップ」は無視する）
+//   ・押している間に10px以上動いたら（スクロール・スワイプのとき）、長押しは取り消す
+//   ・iPhoneの長押しで出る、文字選択・コピーのメニューが出ないようにしてある
+//   ・パソコンでは、右クリックでも onLongPress が呼ばれる
+import { useRef } from 'react'
+import type { ReactNode } from 'react'
+
+const MOVE_LIMIT = 10 // この距離（px）以上動いたら、長押しをやめる
+
+export default function LongPressArea({
+  onTap,
+  onLongPress,
+  children,
+  className = '',
+  ms = 500,
+}: {
+  onTap: () => void
+  onLongPress: () => void
+  children: ReactNode
+  className?: string
+  ms?: number
+}) {
+  const timer = useRef<number | null>(null)
+  const origin = useRef<{ x: number; y: number } | null>(null)
+  const fired = useRef(false) // 長押しが成立した（このあとのクリックは無視する）
+
+  const clear = () => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current)
+      timer.current = null
+    }
+    origin.current = null
+  }
+
+  const fire = () => {
+    fired.current = true
+    clear()
+    if ('vibrate' in navigator) navigator.vibrate(15) // 対応している端末だけ、ブッと震える
+    onLongPress()
+  }
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      className={`select-none [-webkit-touch-callout:none] ${className}`}
+      onPointerDown={(e) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return
+        fired.current = false // 新しい操作の始まり（前回の取りこぼしを、ここで解除する）
+        clear()
+        origin.current = { x: e.clientX, y: e.clientY }
+        timer.current = window.setTimeout(fire, ms)
+      }}
+      onPointerMove={(e) => {
+        const o = origin.current
+        if (!o || timer.current === null) return
+        if (Math.hypot(e.clientX - o.x, e.clientY - o.y) > MOVE_LIMIT) clear()
+      }}
+      onPointerUp={clear}
+      onPointerCancel={clear}
+      onPointerLeave={clear}
+      onContextMenu={(e) => {
+        e.preventDefault() // 端末のメニューは出さない
+        if (!fired.current) fire()
+      }}
+      // 長押しが成立したあとのクリックは、中の部品（画像など）にも届かないようにして、無視する
+      onClickCapture={(e) => {
+        if (fired.current) {
+          e.stopPropagation()
+          e.preventDefault()
+          fired.current = false
+        }
+      }}
+      onClick={onTap}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onTap()
+        }
+      }}
+    >
+      {children}
+    </div>
+  )
+}
+
+===== src\components\MasterIngredientEditor.tsx =====
+// src/components/MasterIngredientEditor.tsx（新規作成）
+// 材料ページの「材料を追加」「材料を編集」の画面（画面いっぱいに重ねて表示する）
+//   ・追加：材料名をテキストで入力 → 「AIで分析」→ 登録画面（レシピ取り込みと同じ画面）→ 登録
+//   ・編集：今の値が入った登録画面。「AIで再取得」で、栄養素・価格・旬・単位をAIの推定値に置き換えられる → 保存
+//   ・前提：analyze-ingredients 関数を公開済み／設定画面で、自分のGeminiキーを登録済み
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+import type { IngredientMaster } from '../types/ingredient'
+import { errorText } from '../lib/errorText'
+import type { RegisterPlan } from '../lib/ingredientRegister'
+import { analyzeIngredients, applyPlan, mergeAnalysis, validatePlan } from '../lib/ingredientRegister'
+import type { UnitDbRow } from '../lib/ingredientMasterEdit'
+import {
+  MAX_ADD_ITEMS,
+  buildAddPlan,
+  fetchUnitsFor,
+  masterToRegItem,
+  nearMasters,
+  refetchItem,
+  saveEdit,
+} from '../lib/ingredientMasterEdit'
+import type { MasterOption } from '../lib/recipeImport'
+import IngredientRegisterStep from './IngredientRegisterStep'
+import type { AiStatus } from './IngredientRegisterStep'
+
+type Props = {
+  mode: 'add' | 'edit'
+  item?: IngredientMaster // 編集する材料（mode="edit" のとき）
+  masters: MasterOption[] // いま材料マスタにある材料（名前の重複チェックに使う）
+  userId: string
+  onClose: () => void
+  onSaved: (message: string) => void
+}
+
+type Stage = 'loading' | 'input' | 'register'
+
+export default function MasterIngredientEditor({ mode, item, masters, userId, onClose, onSaved }: Props) {
+  const isEdit = mode === 'edit'
+  const [stage, setStage] = useState<Stage>(isEdit ? 'loading' : 'input')
+  const [text, setText] = useState('')
+  const [plan, setPlan] = useState<RegisterPlan | null>(null)
+  const [aiStatus, setAiStatus] = useState<AiStatus>('ready')
+  const [aiError, setAiError] = useState<string | null>(null)
+  const [aiErrorCode, setAiErrorCode] = useState<string | null>(null)
+  const [inputError, setInputError] = useState<{ message: string; code: string | null } | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [refetchingKey, setRefetchingKey] = useState<string | null>(null)
+
+  const root = useRef<HTMLDivElement>(null) // 画面いっぱいに重ねた領域（この中がスクロールする）
+  const toTop = (smooth = false) => root.current?.scrollTo({ top: 0, behavior: smooth ? 'smooth' : 'auto' })
+
+  const originalUnits = useRef<UnitDbRow[]>([]) // 編集を開いたときの、DBの単位の一覧
+  const initialJson = useRef('') // 編集を開いたときの内容（直したかどうかの判定用）
+  const run = useRef(0) // AIの呼び出しの何回目か（画面を戻ったあとの、古い結果を捨てるため）
+
+  // ----- 編集：最新の単位をDBから読んで、今の値を入れる -----
+  useEffect(() => {
+    if (!isEdit || !item) return
+    let cancelled = false
+    fetchUnitsFor(item.id)
+      .then((units) => {
+        if (cancelled) return
+        originalUnits.current = units
+        const reg = masterToRegItem(item, units)
+        initialJson.current = JSON.stringify(reg)
+        setPlan({ items: [reg], unitAdds: [] })
+        setAiStatus('ready')
+        setStage('register')
+      })
+      .catch((e) => {
+        console.error(e)
+        if (!cancelled) setError('単位を読み込めませんでした：' + errorText(e))
+      })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ----- 追加：入力した名前を読み取る（入力しながら、すぐ確認できる） -----
+  const parsed = useMemo(() => buildAddPlan(text, masters.map((m) => ({ id: m.id, name: m.name }))), [text, masters])
+  const newNames = parsed.plan.items.map((i) => i.name)
+  const nearHints = useMemo(
+    () =>
+      newNames
+        .map((n) => ({ name: n, near: nearMasters(n, masters) }))
+        .filter((x) => x.near.length > 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [text, masters],
+  )
+
+  // ----- 追加：AIで分析する -----
+  const startAnalysis = async (p: RegisterPlan) => {
+    const id = ++run.current
+    setAiStatus('analyzing')
+    setAiError(null)
+    setAiErrorCode(null)
+    const r = await analyzeIngredients(p, '')
+    if (id !== run.current) return
+    if (r.ok) {
+      setPlan(mergeAnalysis(p, r.analysis))
+      setAiStatus('ready')
+    } else {
+      setPlan(p)
+      setAiStatus('failed')
+      setAiError(r.message)
+      setAiErrorCode(r.code)
+    }
+  }
+
+  const runAnalyze = () => {
+    setInputError(null)
+    if (parsed.plan.items.length === 0) {
+      setInputError({ message: '追加する材料の名前を入力してください', code: null })
+      return
+    }
+    setError(null)
+    setPlan(parsed.plan)
+    setStage('register')
+    toTop()
+    void startAnalysis(parsed.plan)
+  }
+
+  // ----- 編集：AIで再取得 -----
+  const handleRefetch = async (key: string) => {
+    if (!plan || refetchingKey) return
+    const cur = plan.items.find((i) => i.key === key)
+    if (!cur) return
+    if (!window.confirm('栄養素・価格・旬・単位を、AIの推定値で置き換えます。今の入力内容は上書きされます。よろしいですか？')) return
+    setRefetchingKey(key)
+    setError(null)
+    const r = await refetchItem(cur)
+    setRefetchingKey(null)
+    if (!r.ok) {
+      setError('AIの再取得に失敗しました：' + r.message)
+      setAiErrorCode(r.code)
+      return
+    }
+    setAiErrorCode(null)
+    setPlan((p) => (p ? { ...p, items: p.items.map((i) => (i.key === key ? r.item : i)) } : p))
+  }
+
+  // ----- 登録・保存 -----
+  const apply = async () => {
+    if (!plan || saving) return
+    const msg = validatePlan(plan, masters)
+    if (msg) {
+      setError(msg)
+      toTop(true)
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      if (isEdit && item) {
+        const r = await saveEdit(plan.items[0], { master: item, units: originalUnits.current }, (m) => window.confirm(m))
+        if (r === 'cancelled') return
+        onSaved(`「${plan.items[0].name.trim()}」を保存しました`)
+      } else {
+        const n = plan.items.filter((i) => i.checked).length
+        await applyPlan(plan, userId)
+        onSaved(`${n}件の材料を登録しました`)
+      }
+    } catch (e) {
+      console.error(e)
+      setError(errorText(e))
+      toTop(true)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // ----- 戻る・閉じる -----
+  const dirty = isEdit
+    ? plan !== null && JSON.stringify(plan.items[0]) !== initialJson.current
+    : stage === 'register' || text.trim() !== ''
+
+  const close = () => {
+    if (saving) return
+    if (dirty && !window.confirm('入力した内容は破棄されます。閉じますか？')) return
+    run.current++
+    onClose()
+  }
+
+  const backToInput = () => {
+    if (!window.confirm('分析した内容は破棄されます。入力に戻りますか？')) return
+    run.current++
+    setStage('input')
+    setPlan(null)
+    setError(null)
+    toTop()
+  }
+
+  const title = isEdit ? `✏️ 材料を編集：${item?.ingredient_name ?? ''}` : stage === 'register' ? '🥕 材料の登録' : '✨ 材料をAIで追加'
+
+  return (
+    <div ref={root} className="fixed inset-0 z-[70] overflow-y-auto bg-gray-50">
+      <header className="sticky top-0 z-10 flex items-center gap-2 bg-white px-3 py-2.5 shadow-sm">
+        {!isEdit && stage === 'register' ? (
+          <button type="button" onClick={backToInput} className="shrink-0 text-sm font-semibold text-gray-600">
+            ← 入力に戻る
+          </button>
+        ) : (
+          <button type="button" onClick={close} className="shrink-0 text-sm font-semibold text-gray-600">
+            ← 閉じる
+          </button>
+        )}
+        <h1 className="min-w-0 flex-1 truncate text-center text-sm font-bold">{title}</h1>
+        <span className="w-12 shrink-0" />
+      </header>
+
+      {stage === 'loading' && (
+        <div className="p-4">
+          {error ? (
+            <div className="rounded-lg bg-red-50 px-3 py-3 text-sm text-red-600">
+              <p>{error}</p>
+              <button
+                type="button"
+                onClick={onClose}
+                className="mt-2 rounded-full border border-red-300 bg-white px-3 py-1 text-xs font-bold"
+              >
+                閉じる
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="h-12 animate-pulse rounded-xl bg-gray-200" />
+              <div className="h-40 animate-pulse rounded-xl bg-gray-200" />
+            </div>
+          )}
+        </div>
+      )}
+
+      {stage === 'input' && (
+        <div className="p-3">
+          <div className="rounded-xl bg-white p-3 shadow-sm">
+            <label className="block">
+              <span className="mb-1 block text-sm font-bold text-gray-900">追加したい材料の名前</span>
+              <span className="mb-2 block text-xs leading-relaxed text-gray-500">
+                複数あるときは、改行かカンマ（、）で区切って入力します（一度に{MAX_ADD_ITEMS}件まで）。栄養素・価格・旬・単位は、AIが推定します。
+              </span>
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                rows={6}
+                placeholder={'例：\nハム\nしょうが\nマヨネーズ'}
+                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm leading-relaxed focus:border-amber-500 focus:outline-none"
+              />
+            </label>
+
+            {/* 読み取った名前の確認 */}
+            {newNames.length > 0 && (
+              <div className="mt-2">
+                <p className="mb-1 text-[11px] font-semibold text-gray-500">登録する材料（{newNames.length}件）</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {newNames.map((n) => (
+                    <span key={n} className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700">
+                      {n}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {parsed.existing.length > 0 && (
+              <p className="mt-2 rounded-lg bg-gray-100 px-3 py-2 text-[11px] leading-relaxed text-gray-500">
+                すでに材料マスタにあるので、登録しません：{parsed.existing.map((x) => x.masterName).join('、')}
+                （直したいときは、一覧で材料を長押しして「編集」を選んでください）
+              </p>
+            )}
+            {nearHints.length > 0 && (
+              <div className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
+                <p className="font-bold">近い名前の材料がすでにあります（二重に登録しないように、確認してください）</p>
+                <ul className="mt-0.5 list-disc pl-4">
+                  {nearHints.map((h) => (
+                    <li key={h.name}>
+                      {h.name} ← {h.near.map((m) => m.name).join('、')}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {parsed.tooMany && (
+              <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-[11px] text-red-600">
+                材料が多すぎます。最初の{MAX_ADD_ITEMS}件だけを分析します。残りは、あとでもう一度入力してください。
+              </p>
+            )}
+          </div>
+
+          {inputError && (
+            <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-600">
+              <p>{inputError.message}</p>
+              {inputError.code === 'NO_API_KEY' && (
+                <Link to="/settings" className="mt-1 inline-block font-bold underline">
+                  設定を開いて、キーを登録する →
+                </Link>
+              )}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={runAnalyze}
+            disabled={newNames.length === 0}
+            className="mt-3 w-full rounded-xl bg-amber-500 py-3.5 text-base font-bold text-white active:opacity-80 disabled:bg-gray-300"
+          >
+            ✨ AIで分析する{newNames.length > 0 ? `（${newNames.length}件）` : ''}
+          </button>
+
+          <div className="mt-3 rounded-lg bg-white px-3 py-2 text-[11px] leading-relaxed text-gray-500">
+            <p>・分析には、あなたが設定画面で登録したGeminiキーを使います（AIの呼び出しは1回です）。</p>
+            <p>・分析した内容は、次の画面で直してから登録します（この時点では登録されません）。</p>
+          </div>
+        </div>
+      )}
+
+      {stage === 'register' && plan && (
+        <IngredientRegisterStep
+          plan={plan}
+          onChange={setPlan}
+          masters={masters}
+          aiStatus={aiStatus}
+          aiError={aiError}
+          aiErrorCode={aiErrorCode}
+          onRetry={() => void startAnalysis(plan)}
+          saving={saving}
+          error={error}
+          onApply={() => void apply()}
+          variant={isEdit ? 'edit' : 'master'}
+          onRefetch={isEdit ? (k) => void handleRefetch(k) : undefined}
+          refetchingKey={refetchingKey}
+        />
+      )}
+
+      {/* 編集：AIの再取得でキー未登録のとき */}
+      {stage === 'register' && isEdit && aiErrorCode === 'NO_API_KEY' && (
+        <div className="px-3 pb-6">
+          <Link to="/settings" className="text-xs font-bold text-red-600 underline">
+            設定を開いて、Geminiキーを登録する →
+          </Link>
+        </div>
+      )}
+    </div>
+  )
+}
+
 ===== src\components\PasskeySettings.tsx =====
 // src/components/PasskeySettings.tsx（新規作成）
 // 設定画面の「FaceID / パスキー」：この端末でパスキーを登録する
@@ -2021,24 +2811,143 @@ export default function PasskeySettings() {
   )
 }
 
-===== src\components\ServingsStepper.tsx =====
-// src/components/ServingsStepper.tsx（新規作成）
-// 「－ 2人前 ＋」の人数切替ボタン
-import { MAX_SERVINGS, MIN_SERVINGS } from '../lib/useServings'
+===== src\components\RecipesUsingSheet.tsx =====
+// src/components/RecipesUsingSheet.tsx（新規作成）
+// 「この材料を使うレシピ」の一覧（下から出る画面）。タップすると、そのレシピの詳細画面へ移動する
+//   ・材料マスタに結び付いているレシピが対象。名前が同じでも結び付いていないレシピは「未結び付け」と表示する
+import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { errorText } from '../lib/errorText'
+import type { RecipeUsage } from '../lib/ingredientMasterEdit'
+import { fetchRecipesUsing } from '../lib/ingredientMasterEdit'
+import { useRecipeImage } from '../lib/useRecipeImage'
 
+function Thumb({ path }: { path: string | null }) {
+  const url = useRecipeImage(path)
+  return (
+    <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-gray-100 text-xl">
+      {url ? <img src={url} alt="" className="h-full w-full object-cover" /> : '🍽️'}
+    </div>
+  )
+}
+
+export default function RecipesUsingSheet({
+  master,
+  onClose,
+}: {
+  master: { id: string; name: string }
+  onClose: () => void
+}) {
+  const navigate = useNavigate()
+  const [rows, setRows] = useState<RecipeUsage[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetchRecipesUsing({ id: master.id, name: master.name })
+      .then((r) => {
+        if (!cancelled) setRows(r)
+      })
+      .catch((e) => {
+        console.error(e)
+        if (!cancelled) setError(errorText(e))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [master.id, master.name])
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-end bg-black/40 sm:items-center sm:justify-center" onClick={onClose}>
+      <div
+        className="max-h-[85vh] w-full overflow-y-auto rounded-t-2xl bg-white px-4 pt-4 sm:max-w-md sm:rounded-2xl"
+        style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h3 className="min-w-0 truncate text-base font-bold text-gray-900">🍳 「{master.name}」を使うレシピ</h3>
+          <button onClick={onClose} className="shrink-0 rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-500">
+            閉じる
+          </button>
+        </div>
+
+        {error ? (
+          <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">レシピを検索できませんでした：{error}</p>
+        ) : rows === null ? (
+          <div className="space-y-2">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="h-16 animate-pulse rounded-xl bg-gray-100" />
+            ))}
+          </div>
+        ) : rows.length === 0 ? (
+          <p className="py-6 text-center text-sm text-gray-400">この材料を使うレシピは、まだありません。</p>
+        ) : (
+          <>
+            <p className="mb-2 text-xs text-gray-400">{rows.length}件（作った回数が多い順）</p>
+            <ul className="space-y-2">
+              {rows.map(({ recipe, amounts, linked }) => (
+                <li key={recipe.id}>
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/recipes/${recipe.id}`)}
+                    className="flex w-full items-center gap-3 rounded-xl border border-gray-100 p-2 text-left active:bg-gray-50"
+                  >
+                    <Thumb path={recipe.image_path} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-bold text-gray-900">{recipe.dish_name}</span>
+                      <span className="block truncate text-[11px] text-gray-400">
+                        {[recipe.source_name, recipe.genre, recipe.category].filter(Boolean).join(' ・ ')}
+                      </span>
+                      <span className="block truncate text-[11px] text-gray-500">
+                        {amounts.length > 0 ? `${master.name} ${amounts.join('、')}` : master.name}
+                        {recipe.cook_count > 0 && <span className="text-gray-400">　🍳{recipe.cook_count}回</span>}
+                        {!linked && (
+                          <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                            未結び付け
+                          </span>
+                        )}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-gray-300">›</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {rows.some((r) => !r.linked) && (
+              <p className="mt-2 text-[11px] leading-relaxed text-gray-400">
+                「未結び付け」は、材料名が同じだけで、材料マスタに結び付いていないレシピです（カロリー・費用は、その材料ぶんが「未計算」になります）。
+              </p>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+===== src\components\ServingsStepper.tsx =====
+// src/components/ServingsStepper.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 「－ 2人前 ＋」の人数切替ボタン
+// 今回の変更：最小・最大の人数を、使う場所ごとに変えられるようにした（min / max。省略すると 1〜20）
 export default function ServingsStepper({
   value,
   onChange,
+  min = 1,
+  max = 20,
+  disabled = false,
 }: {
   value: number
   onChange: (n: number) => void
+  min?: number
+  max?: number
+  disabled?: boolean
 }) {
   return (
     <div className="flex shrink-0 items-center overflow-hidden rounded-full border border-gray-300 bg-white text-xs font-bold text-gray-700">
       <button
         type="button"
-        onClick={() => onChange(value - 1)}
-        disabled={value <= MIN_SERVINGS}
+        onClick={() => onChange(Math.max(min, value - 1))}
+        disabled={disabled || value <= min}
         aria-label="人数を減らす"
         className="px-2.5 py-1 text-base leading-none active:bg-gray-100 disabled:opacity-30"
       >
@@ -2047,8 +2956,8 @@ export default function ServingsStepper({
       <span className="min-w-[3.2rem] text-center">{value}人前</span>
       <button
         type="button"
-        onClick={() => onChange(value + 1)}
-        disabled={value >= MAX_SERVINGS}
+        onClick={() => onChange(Math.min(max, value + 1))}
+        disabled={disabled || value >= max}
         aria-label="人数を増やす"
         className="px-2.5 py-1 text-base leading-none active:bg-gray-100 disabled:opacity-30"
       >
@@ -2099,12 +3008,12 @@ export default function SettingsSection({
 }
 
 ===== src\components\ShoppingAddSheet.tsx =====
-
 // src/components/ShoppingAddSheet.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：材料マスタの単位表（ingredient_units）も読み込み、単位違いの材料を基準単位にそろえて合算する
+// 今回の変更：人数は、献立のレシピごとの「何人前つくるか」（RecipeInfo.planned）で計算する（画面全体の人数設定はなくした）
+// 前回の変更：材料マスタの単位表（ingredient_units）も読み込み、単位違いの材料を基準単位にそろえて合算する
 // 「買い物リストに追加」の確認画面（全画面）
 //   確定した献立の材料を合計して一覧表示 → 選択／削除／数量変更 → 「確定して買い物リストへ追加」
-//   ・人数は、献立画面の人数設定（○人前）で分量を計算
+//   ・人数は、献立画面でレシピごとに決めた「○人前」で分量を計算
 //   ・すでに買い物リストにある材料は、最初は選択オフ（追加すると数量が足されます）
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../supabaseClient'
@@ -2122,14 +3031,13 @@ type SheetItem = AggItem & {
 }
 
 type Props = {
-  recipes: RecipeInfo[] // 確定している料理
-  servings: number // 何人前ぶん買うか
+  recipes: RecipeInfo[] // 確定している料理（planned＝何人前つくるか）
   userId: string
   onClose: () => void
   onAdded: (count: number) => void
 }
 
-export default function ShoppingAddSheet({ recipes, servings, userId, onClose, onAdded }: Props) {
+export default function ShoppingAddSheet({ recipes, userId, onClose, onAdded }: Props) {
   const [items, setItems] = useState<SheetItem[]>([])
   const [order, setOrder] = useState<string[]>(normalizeCategoryOrder(null))
   const [loading, setLoading] = useState(true)
@@ -2204,7 +3112,7 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
           }
         })
 
-        const agg = aggregateIngredients(raws, recipes, servings)
+        const agg = aggregateIngredients(raws, recipes)
         if (cancelled) return
         setOrder(catOrder)
         setItems(
@@ -2282,7 +3190,7 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-base font-bold text-gray-900">🛒 買い物リストに追加</h2>
           <p className="truncate text-[11px] text-gray-400">
-            確定 {recipes.length}品 ／ {servings}人前ぶん
+            確定 {recipes.length}品（献立で決めた、料理ごとの人数で計算）
           </p>
         </div>
         <button
@@ -3084,7 +3992,8 @@ export function errorText(e: unknown): string {
 }
 
 ===== src\lib\household.ts =====
-// src/lib/household.ts（新規作成）
+// src/lib/household.ts（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：献立に追加したときの人数の初期値（households.default_plan_servings）の読み書きを追加
 // 世帯（家族グループ）まわりのDB操作：世帯ID・買い物リストのID・カテゴリ順の読み書き
 import { supabase } from '../supabaseClient'
 import { normalizeCategoryOrder } from './categoryOrder'
@@ -3155,6 +4064,542 @@ export async function getOrCreateShoppingListId(householdId: string, userId: str
   return data.id as string
 }
 
+// ---------- 献立に追加したときの人数の初期値（設定画面で変える。家族で共通） ----------
+export const DEFAULT_PLAN_SERVINGS = 2
+export const MIN_PLAN_SERVINGS = 1
+export const MAX_PLAN_SERVINGS = 20
+
+let planCache: { householdId: string; value: number } | null = null
+
+export async function fetchDefaultPlanServings(householdId: string): Promise<number> {
+  if (planCache && planCache.householdId === householdId) return planCache.value
+  const { data, error } = await supabase
+    .from('households')
+    .select('default_plan_servings')
+    .eq('id', householdId)
+    .maybeSingle()
+  if (error) {
+    // 13のSQLが未実行などで読めないときは、初期値を使う
+    console.error(error)
+    return DEFAULT_PLAN_SERVINGS
+  }
+  const v = Number((data as { default_plan_servings?: unknown } | null)?.default_plan_servings)
+  const value = Number.isInteger(v) && v >= MIN_PLAN_SERVINGS && v <= MAX_PLAN_SERVINGS ? v : DEFAULT_PLAN_SERVINGS
+  planCache = { householdId, value }
+  return value
+}
+
+export async function saveDefaultPlanServings(householdId: string, value: number): Promise<void> {
+  const { data, error } = await supabase
+    .from('households')
+    .update({ default_plan_servings: value })
+    .eq('id', householdId)
+    .select('id')
+  if (error) throw error
+  if (!data || data.length === 0) throw new Error('保存できませんでした（権限を確認してください）')
+  planCache = { householdId, value }
+}
+
+// ログイン中のユーザーの「献立に追加したときの人数」の初期値
+export async function defaultPlanServingsFor(userId: string): Promise<number> {
+  try {
+    return await fetchDefaultPlanServings(await getHouseholdId(userId))
+  } catch (e) {
+    console.error(e)
+    return DEFAULT_PLAN_SERVINGS
+  }
+}
+
+===== src\lib\ingredientMasterEdit.ts =====
+// src/lib/ingredientMasterEdit.ts（新規作成）
+// 材料ページからの「AIで材料を追加」「材料を編集」「この材料を使うレシピを探す」の共通部品
+//   ・追加：材料名をテキストで入力 → AIで栄養素・価格・旬・単位を推定 → 確認・修正 → 登録（レシピ取り込みと同じ画面）
+//   ・編集：今の値を入れた同じ画面で直す。「AIで再取得」で、栄養素・価格・旬・単位をAIの推定値に置き換えられる
+//   ・編集の保存は、材料マスタ（ingredient_master）と単位（ingredient_units）を更新する。途中で失敗したら、元に戻す
+//   ・レシピ検索：材料マスタに結び付いているレシピ（と、名前が同じで未結び付けのレシピ）を探す
+import { supabase } from '../supabaseClient'
+import type { IngredientMaster } from '../types/ingredient'
+import type { CallFailure } from './callFunction'
+import { errorText } from './errorText'
+import type { IngredientAnalysis, RegisterPlan, RegItem, RegUnit } from './ingredientRegister'
+import { NUTRIENTS, analyzeIngredients, emptyNutrients, normalizeUnits, parseNum } from './ingredientRegister'
+import type { MasterOption } from './recipeImport'
+import { fmtUsage, newKey, normName, normUnit, splitPrep } from './recipeImport'
+
+// ---------- 追加：名前の入力を読み取る ----------
+export const MAX_ADD_ITEMS = 30 // 一度に分析できる材料の数（関数側の上限と同じ）
+
+// 改行・カンマ（、，,）・セミコロンで区切る。先頭の「・」「-」「1.」などの飾りと、末尾の（　）の下ごしらえは取り除く
+export function parseNames(text: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of text.split(/[\n\r,、，;；]+/)) {
+    let t = raw.trim()
+    t = t.replace(/^[・\-*•●○■□▪‣\s]+/, '').replace(/^\d+[.)．）]\s*/, '')
+    t = splitPrep(t, '').name.trim()
+    if (!t) continue
+    if (t.length > 40) t = t.slice(0, 40)
+    const k = normName(t)
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push(t)
+  }
+  return out
+}
+
+export type AddPlanResult = {
+  plan: RegisterPlan
+  existing: { name: string; masterId: string; masterName: string }[] // すでに材料マスタにある名前（登録しない）
+  tooMany: boolean
+}
+
+export function buildAddPlan(text: string, masters: { id: string; name: string }[]): AddPlanResult {
+  const byName = new Map(masters.map((m) => [normName(m.name), m]))
+  const items: RegItem[] = []
+  const existing: AddPlanResult['existing'] = []
+
+  for (const name of parseNames(text)) {
+    const hit = byName.get(normName(name))
+    if (hit) {
+      existing.push({ name, masterId: hit.id, masterName: hit.name })
+      continue
+    }
+    items.push({
+      key: `n:${normName(name)}`,
+      match: normName(name),
+      name,
+      usage: '',
+      usages: [],
+      checked: true,
+      linkTo: '',
+      category: 'その他',
+      price: '',
+      peakMonths: [],
+      units: [],
+      nutrients: emptyNutrients(),
+      warnings: [],
+      aiOk: false,
+      masterId: null,
+      brand: '',
+      product: '',
+      store: '',
+      note: '',
+      source: 'ai_estimate',
+    })
+  }
+  return { plan: { items: items.slice(0, MAX_ADD_ITEMS), unitAdds: [] }, existing, tooMany: items.length > MAX_ADD_ITEMS }
+}
+
+// 入力した名前に近い（含まれ合う）既存の材料。二重に登録しないための目印として出す
+export function nearMasters(name: string, masters: MasterOption[], limit = 3): MasterOption[] {
+  const n = normName(name)
+  if (n.length < 2) return []
+  return masters
+    .filter((m) => {
+      const mn = normName(m.name)
+      return mn !== n && mn.length >= 2 && (mn.includes(n) || n.includes(mn))
+    })
+    .slice(0, limit)
+}
+
+// ---------- 編集：今の値を、登録画面と同じ形にする ----------
+export type UnitDbRow = {
+  id: string
+  ingredient_master_id: string
+  unit: string
+  weight_g: number
+  is_default: boolean
+  sort_order: number
+}
+
+// 基準の単位が先頭 → 並び順 → 名前順（材料ページの単位編集と同じ並び）
+function sortUnits(rows: UnitDbRow[]): UnitDbRow[] {
+  return [...rows].sort(
+    (a, b) =>
+      Number(b.is_default) - Number(a.is_default) || a.sort_order - b.sort_order || a.unit.localeCompare(b.unit, 'ja'),
+  )
+}
+
+export function masterToRegItem(m: IngredientMaster, units: UnitDbRow[]): RegItem {
+  const nutrients = emptyNutrients()
+  const rec = m as unknown as Record<string, unknown>
+  for (const n of NUTRIENTS) {
+    const v = rec[n.col]
+    nutrients[n.col] = typeof v === 'number' ? String(v) : v == null || v === '' ? '' : String(v)
+  }
+  const regUnits: RegUnit[] = sortUnits(units).map((u) => {
+    const isG = normUnit(u.unit) === 'g'
+    return {
+      key: newKey(),
+      id: u.id,
+      unit: u.unit,
+      weight: isG ? '1' : String(u.weight_g),
+      isDefault: u.is_default,
+      fixed: isG,
+    }
+  })
+  return {
+    key: `e:${m.id}`,
+    match: normName(m.ingredient_name),
+    name: m.ingredient_name,
+    usage: '',
+    usages: [],
+    checked: true,
+    linkTo: '',
+    category: m.category,
+    price: m.price_per_100g == null ? '' : String(m.price_per_100g),
+    peakMonths: [...(m.peak_season_months ?? [])].sort((a, b) => a - b),
+    units: regUnits,
+    nutrients,
+    warnings: [],
+    aiOk: true,
+    masterId: m.id,
+    brand: m.brand_name ?? '',
+    product: m.usual_product_name ?? '',
+    store: m.store_name ?? '',
+    note: m.note ?? '',
+    source: m.nutrition_source ?? 'ai_estimate',
+  }
+}
+
+export async function fetchUnitsFor(masterId: string): Promise<UnitDbRow[]> {
+  const { data, error } = await supabase
+    .from('ingredient_units')
+    .select('id, ingredient_master_id, unit, weight_g, is_default, sort_order')
+    .eq('ingredient_master_id', masterId)
+  if (error) throw error
+  return ((data ?? []) as UnitDbRow[]).map((r) => ({ ...r, weight_g: Number(r.weight_g) }))
+}
+
+// ---------- 編集：AIで再取得 ----------
+type ServerItem = IngredientAnalysis['items'][number]
+
+// AIの結果を、編集中の材料に取り込む。名前・銘柄・いつもの商品・購入店・メモは、そのまま残す
+//   ・AIが出せなかった項目（空欄・重さ不明）は、今の値を残す
+//   ・今ある単位は、AIの結果に無くても残す（レシピで使っている単位を、勝手に消さないため）
+export function mergeRefetch(item: RegItem, s: ServerItem | undefined): RegItem {
+  if (!s || s.ai_ok === false) {
+    return {
+      ...item,
+      warnings: [...(s?.warnings ?? ['AIが結果を返しませんでした。もう一度お試しください'])],
+    }
+  }
+
+  const nutrients = { ...item.nutrients }
+  for (const n of NUTRIENTS) {
+    const v = s.nutrients?.[n.col]
+    if (v != null) nutrients[n.col] = String(v)
+  }
+
+  const old = new Map(item.units.map((u) => [normUnit(u.unit), u]))
+  const units: RegUnit[] = []
+  const seen = new Set<string>()
+
+  // gの行（fixed）は、先頭に残す
+  for (const u of item.units) {
+    if (u.fixed) {
+      units.push({ ...u })
+      seen.add('g')
+    }
+  }
+  for (const u of s.units ?? []) {
+    const name = normUnit(u.unit)
+    if (!name || name === 'g' || seen.has(name)) continue
+    seen.add(name)
+    const prev = old.get(name)
+    const weight = u.weight_g != null ? String(u.weight_g) : (prev?.weight ?? '')
+    units.push({ key: prev?.key ?? newKey(), id: prev?.id, unit: u.unit, weight, isDefault: false })
+  }
+  for (const u of item.units) {
+    const name = normUnit(u.unit)
+    if (u.fixed || !name || seen.has(name)) continue
+    seen.add(name)
+    units.push({ ...u, isDefault: false })
+  }
+
+  // 基準の単位：今の基準が残っていればそのまま。無ければAIの基準 → 先頭
+  const curDef = item.units.find((u) => u.isDefault)
+  const aiDef = (s.units ?? []).find((u) => u.is_default)
+  const want = normUnit(curDef?.unit ?? aiDef?.unit ?? '')
+  const idx = units.findIndex((u) => (u.fixed ? 'g' : normUnit(u.unit)) === want)
+  const defIdx = idx >= 0 ? idx : units.length > 0 ? 0 : -1
+  const finalUnits = units.map((u, i) => ({ ...u, isDefault: i === defIdx }))
+
+  const price = s.price_per_100g != null ? String(s.price_per_100g) : item.price
+
+  return {
+    ...item,
+    aiOk: true,
+    category: s.category && s.category.length > 0 ? s.category : item.category,
+    price,
+    peakMonths: s.peak_season_months ?? item.peakMonths,
+    units: finalUnits,
+    nutrients,
+    warnings: s.warnings ?? [],
+    source: 'ai_estimate',
+  }
+}
+
+export type RefetchResult = { ok: true; item: RegItem } | CallFailure
+
+export async function refetchItem(item: RegItem): Promise<RefetchResult> {
+  // 今ある単位を「使い方」として渡すと、AIがその単位の重さも答える
+  const usages = item.units
+    .filter((u) => !u.fixed && u.unit.trim() !== '')
+    .map((u) => ({ quantity: '1', unit: normUnit(u.unit) }))
+  const plan: RegisterPlan = { items: [{ ...item, usages }], unitAdds: [] }
+  const r = await analyzeIngredients(plan, '')
+  if (!r.ok) return r
+  return { ok: true, item: mergeRefetch(item, r.analysis.items.find((i) => i.key === item.key)) }
+}
+
+// ---------- 編集：保存 ----------
+export async function countUnitUsage(masterId: string, units: string[]): Promise<number> {
+  if (units.length === 0) return 0
+  const { count, error } = await supabase
+    .from('ingredients')
+    .select('id', { count: 'exact', head: true })
+    .eq('ingredient_master_id', masterId)
+    .in('unit', units)
+  if (error) throw error
+  return count ?? 0
+}
+
+type Undo = () => Promise<void>
+
+// 編集を保存する。戻り値：'saved'（保存した）／'cancelled'（確認で中止した）
+//   順番：① 材料マスタ本体 → ② 基準の解除 → ③ 単位の削除 → ④ 単位の更新（名前・重さ・基準）→ ⑤ 単位の追加
+//   途中で失敗したら、行った操作を逆の順に取り消す
+export async function saveEdit(
+  item: RegItem,
+  original: { master: IngredientMaster; units: UnitDbRow[] },
+  confirmFn: (message: string) => boolean,
+): Promise<'saved' | 'cancelled'> {
+  const masterId = item.masterId
+  if (!masterId) throw new Error('編集する材料が分かりません')
+  const name = item.name.trim()
+  if (!name) throw new Error('材料名を入力してください')
+
+  const final = normalizeUnits(item.units)
+  const origById = new Map(original.units.map((u) => [u.id, u]))
+  const keptIds = new Set(final.filter((f) => f.id && origById.has(f.id)).map((f) => f.id as string))
+  const toDelete = original.units.filter((u) => !keptIds.has(u.id) && normUnit(u.unit) !== 'g')
+
+  // 削除・名前の変更で、レシピの材料が「未計算」になるときは、確認する
+  const gone = new Set(toDelete.map((u) => u.unit))
+  for (const f of final) {
+    const o = f.id ? origById.get(f.id) : undefined
+    if (o && o.unit !== f.unit) gone.add(o.unit)
+  }
+  if (gone.size > 0) {
+    const used = await countUnitUsage(masterId, [...gone])
+    if (used > 0) {
+      const ok = confirmFn(
+        `削除・名前を変えた単位（${[...gone].join('・')}）は、レシピの材料 ${used} 件で使われています。保存すると、その材料が「未計算」になります。それでも保存しますか？`,
+      )
+      if (!ok) return 'cancelled'
+    }
+  }
+
+  const def = final.find((f) => f.isDefault)
+  const peak = [...item.peakMonths].sort((a, b) => a - b)
+  const payload: Record<string, unknown> = {
+    ingredient_name: name,
+    category: item.category,
+    price_per_100g: parseNum(item.price),
+    peak_season_months: peak.length > 0 ? peak : null,
+    brand_name: item.brand.trim() || null,
+    usual_product_name: item.product.trim() || null,
+    store_name: item.store.trim() || null,
+    note: item.note.trim() || null,
+    nutrition_source: item.source || original.master.nutrition_source || 'ai_estimate',
+    default_unit: def ? def.unit : 'g',
+    unit_weight_g: def ? (def.unit === 'g' ? 1 : def.weight) : 1,
+    updated_at: new Date().toISOString(),
+  }
+  for (const n of NUTRIENTS) payload[n.col] = parseNum(item.nutrients[n.col])
+
+  const undo: Undo[] = []
+  try {
+    // ① 材料マスタ本体（名前の重複はここで分かるので、いちばん先に行う）
+    const before: Record<string, unknown> = {}
+    const origRec = original.master as unknown as Record<string, unknown>
+    for (const k of Object.keys(payload)) before[k] = origRec[k] ?? null
+    {
+      const { data, error } = await supabase.from('ingredient_master').update(payload).eq('id', masterId).select('id')
+      if (error) {
+        if ((error as { code?: string }).code === '23505') {
+          throw new Error(`「${name}」は、材料マスタにほかの材料としてすでにあります。名前を変えてください`)
+        }
+        throw error
+      }
+      if (!data || data.length === 0) throw new Error('材料を更新できませんでした（権限を確認してください）')
+      undo.push(async () => {
+        const { error: e } = await supabase.from('ingredient_master').update(before).eq('id', masterId)
+        if (e) throw e
+      })
+    }
+
+    // ② 基準でなくなる単位の、基準を外す（基準は1材料に1つだけなので、新しい基準を付ける前に外す）
+    for (const f of final) {
+      const o = f.id ? origById.get(f.id) : undefined
+      if (o && o.is_default && !f.isDefault) {
+        const { data, error } = await supabase.from('ingredient_units').update({ is_default: false }).eq('id', o.id).select('id')
+        if (error) throw error
+        if (!data || data.length === 0) throw new Error('単位を更新できませんでした（権限を確認してください）')
+        undo.push(async () => {
+          const { error: e } = await supabase.from('ingredient_units').update({ is_default: true }).eq('id', o.id)
+          if (e) throw e
+        })
+      }
+    }
+
+    // ③ 単位の削除
+    for (const o of toDelete) {
+      const { data, error } = await supabase.from('ingredient_units').delete().eq('id', o.id).select('id')
+      if (error) throw error
+      if (!data || data.length === 0) throw new Error('単位を削除できませんでした（権限を確認してください）')
+      undo.push(async () => {
+        const { error: e } = await supabase.from('ingredient_units').insert({
+          id: o.id,
+          ingredient_master_id: o.ingredient_master_id,
+          unit: o.unit,
+          weight_g: o.weight_g,
+          is_default: o.is_default,
+          sort_order: o.sort_order,
+        })
+        if (e) throw e
+      })
+    }
+
+    // ④ 単位の更新（名前・重さ・基準。並び順は、画面で入れ替えられないので、そのままにする）
+    for (const f of final) {
+      const o = f.id ? origById.get(f.id) : undefined
+      if (!o) continue
+      const patch: Record<string, unknown> = {}
+      const back: Record<string, unknown> = {}
+      if (o.unit !== f.unit && normUnit(o.unit) !== 'g') {
+        patch.unit = f.unit
+        back.unit = o.unit
+      }
+      if (normUnit(o.unit) !== 'g' && o.weight_g !== f.weight) {
+        patch.weight_g = f.weight
+        back.weight_g = o.weight_g
+      }
+      if (!o.is_default && f.isDefault) {
+        patch.is_default = true
+        back.is_default = false
+      }
+      if (Object.keys(patch).length === 0) continue
+      const { data, error } = await supabase.from('ingredient_units').update(patch).eq('id', o.id).select('id')
+      if (error) throw error
+      if (!data || data.length === 0) throw new Error('単位を更新できませんでした（権限を確認してください）')
+      undo.push(async () => {
+        const { error: e } = await supabase.from('ingredient_units').update(back).eq('id', o.id)
+        if (e) throw e
+      })
+    }
+
+    // ⑤ 単位の追加（並び順は、今ある単位のあとに続ける）
+    let order = original.units.reduce((m, u) => Math.max(m, u.sort_order), -1)
+    const adds = final
+      .filter((f) => !(f.id && origById.has(f.id)))
+      .map((f) => ({
+        ingredient_master_id: masterId,
+        unit: f.unit,
+        weight_g: f.weight,
+        is_default: f.isDefault,
+        sort_order: ++order,
+      }))
+    if (adds.length > 0) {
+      const { data, error } = await supabase.from('ingredient_units').insert(adds).select('id')
+      if (error) throw error
+      const ids = ((data ?? []) as { id: string }[]).map((r) => r.id)
+      if (ids.length !== adds.length) throw new Error('単位を追加できませんでした（権限を確認してください）')
+      undo.push(async () => {
+        const { error: e } = await supabase.from('ingredient_units').delete().in('id', ids)
+        if (e) throw e
+      })
+    }
+  } catch (e) {
+    let rollbackFailed = false
+    for (const u of undo.reverse()) {
+      try {
+        await u()
+      } catch (e2) {
+        console.error(e2)
+        rollbackFailed = true
+      }
+    }
+    if (rollbackFailed) {
+      throw new Error(`${errorText(e)}（元に戻す処理にも失敗しました。材料を開き直して、内容を確認してください）`)
+    }
+    throw e
+  }
+  return 'saved'
+}
+
+// ---------- この材料を使うレシピを探す ----------
+export type RecipeBrief = {
+  id: string
+  dish_name: string
+  source_name: string | null
+  genre: string | null
+  category: string | null
+  image_path: string | null
+  cooking_time_minutes: number | null
+  cook_count: number
+}
+export type RecipeUsage = {
+  recipe: RecipeBrief
+  amounts: string[] // この材料の分量（例：大さじ2、100g）
+  linked: boolean // 材料マスタに結び付いている（false＝名前が同じだけで、未結び付け）
+}
+
+type UsageRaw = {
+  quantity: string | null
+  unit: string | null
+  recipe_id: string
+  recipes: RecipeBrief | RecipeBrief[] | null
+}
+
+const RECIPE_COLS = 'id, dish_name, source_name, genre, category, image_path, cooking_time_minutes, cook_count'
+
+export async function fetchRecipesUsing(master: { id: string; name: string }): Promise<RecipeUsage[]> {
+  const sel = `quantity, unit, recipe_id, recipes(${RECIPE_COLS})`
+  const [linked, byName] = await Promise.all([
+    supabase.from('ingredients').select(sel).eq('ingredient_master_id', master.id),
+    // 結び付けていないレシピでも、材料名が同じなら拾う
+    supabase.from('ingredients').select(sel).is('ingredient_master_id', null).eq('ingredient_name', master.name),
+  ])
+  if (linked.error) throw linked.error
+  // 名前での検索に失敗しても、結び付いているレシピは表示する
+  if (byName.error) console.error(byName.error)
+
+  const map = new Map<string, RecipeUsage>()
+  const add = (rows: UsageRaw[], isLinked: boolean) => {
+    for (const r of rows) {
+      const rec = Array.isArray(r.recipes) ? r.recipes[0] : r.recipes
+      if (!rec) continue
+      const amount = fmtUsage(r.quantity ?? '', r.unit ?? '')
+      const hit = map.get(rec.id)
+      if (hit) {
+        if (amount && !hit.amounts.includes(amount)) hit.amounts.push(amount)
+        if (isLinked) hit.linked = true
+      } else {
+        map.set(rec.id, { recipe: rec, amounts: amount ? [amount] : [], linked: isLinked })
+      }
+    }
+  }
+  add((linked.data ?? []) as unknown as UsageRaw[], true)
+  add((byName.data ?? []) as unknown as UsageRaw[], false)
+
+  // 作った回数が多い順 → 料理名順
+  return [...map.values()].sort(
+    (a, b) => b.recipe.cook_count - a.recipe.cook_count || a.recipe.dish_name.localeCompare(b.recipe.dish_name, 'ja'),
+  )
+}
+
 ===== src\lib\ingredientOrder.ts =====
 // src/lib/ingredientOrder.ts（新規作成）
 // レシピ詳細の「材料」表の並び順の計算（画面に依存しない部品）
@@ -3187,7 +4632,11 @@ export function orderByCategory<T>(
 }
 
 ===== src\lib\ingredientRegister.ts =====
-// src/lib/ingredientRegister.ts（新規作成）
+// src/lib/ingredientRegister.ts（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：材料ページからの追加・編集でも使えるようにした
+//   ・RegItem に、既存材料のID（masterId）・銘柄・いつもの商品・購入店・メモ・データ出典を追加
+//   ・RegUnit に、既存の単位のID（id）と、gの行（fixed：重さ1g固定）を追加
+//   ・名前の重複チェックは、編集中の材料自身を除く
 // レシピ取り込みの「材料の登録」の共通部品
 //   ・AIが読み取ったレシピに、材料マスタに無い材料（や、マスタに無い単位）があるとき、
 //     先に材料マスタへ登録する。栄養素・カロリー・価格・旬・単位（1単位が何gか）は、AIが推定する
@@ -3237,7 +4686,9 @@ export function emptyNutrients(): NutrientForm {
 export const CATEGORY_OPTIONS = DEFAULT_CATEGORY_ORDER
 
 // ---------- 型 ----------
-export type RegUnit = { key: string; unit: string; weight: string; isDefault: boolean }
+// id：編集のとき、すでにDBにある単位の行のID（名前を変えたときも、同じ行として更新するため）
+// fixed：gの行（重さは1g固定。名前・重さを直したり、削除したりできない。基準にはできる）
+export type RegUnit = { key: string; unit: string; weight: string; isDefault: boolean; id?: string; fixed?: boolean }
 
 // 新しく登録する材料
 export type RegItem = {
@@ -3255,6 +4706,12 @@ export type RegItem = {
   nutrients: NutrientForm
   warnings: string[]
   aiOk: boolean
+  masterId: string | null // 編集中の既存材料のID（新しく登録する材料は null）
+  brand: string // 銘柄（調味料など）
+  product: string // いつもの商品名
+  store: string // 購入店
+  note: string // メモ
+  source: string // データ出典（standard_table / label / ai_estimate）
 }
 
 // すでにある材料に、単位を1つ足す
@@ -3305,6 +4762,12 @@ export function buildPlan(draft: Draft, masters: MasterOption[]): RegisterPlan {
           nutrients: emptyNutrients(),
           warnings: [],
           aiOk: false,
+          masterId: null,
+          brand: '',
+          product: '',
+          store: '',
+          note: 'レシピ取り込み時にAIが推定した値',
+          source: 'ai_estimate',
         }
         items.set(match, it)
       }
@@ -3440,23 +4903,33 @@ export function mergeAnalysis(plan: RegisterPlan, a: IngredientAnalysis): Regist
 }
 
 // ---------- 入力のチェック ----------
-function parseNum(s: string): number | null {
+export function parseNum(s: string): number | null {
   const t = s.normalize('NFKC').replace(/,/g, '').trim()
   if (t === '') return null
   const n = Number(t)
   return Number.isFinite(n) ? n : NaN
 }
 
-// 単位の表を、保存できる形に整える（空の行・gは除く。基準の単位は必ず1つ）
-export function normalizeUnits(units: RegUnit[]): { unit: string; weight: number; isDefault: boolean }[] {
+// 単位の表を、保存できる形に整える（空の行・重複は除く。基準の単位は必ず1つ）
+//   ・gの行（fixed）は、重さ1gで残す。fixed でない「g」の行は、これまでどおり除く（gは常に1gのため）
+//   ・id は、編集のときの、既存の行のID
+export type NormUnit = { id?: string; unit: string; weight: number; isDefault: boolean }
+
+export function normalizeUnits(units: RegUnit[]): NormUnit[] {
   const seen = new Set<string>()
-  const out: { unit: string; weight: number; isDefault: boolean }[] = []
+  const out: NormUnit[] = []
   for (const u of units) {
+    if (u.fixed) {
+      if (seen.has('g')) continue
+      seen.add('g')
+      out.push({ id: u.id, unit: 'g', weight: 1, isDefault: u.isDefault })
+      continue
+    }
     const name = normUnit(u.unit)
     const w = parseNum(u.weight)
     if (!name || name === 'g' || seen.has(name) || w === null || Number.isNaN(w) || w <= 0) continue
     seen.add(name)
-    out.push({ unit: name, weight: w, isDefault: u.isDefault })
+    out.push({ id: u.id, unit: name, weight: w, isDefault: u.isDefault })
   }
   let found = false
   for (const u of out) {
@@ -3468,7 +4941,7 @@ export function normalizeUnits(units: RegUnit[]): { unit: string; weight: number
 }
 
 export function validatePlan(plan: RegisterPlan, masters: MasterOption[]): string | null {
-  const existing = new Set(masters.map((m) => normName(m.name)))
+  const existing = new Map(masters.map((m) => [normName(m.name), m.id]))
   const used = new Set<string>()
 
   for (const it of plan.items) {
@@ -3476,8 +4949,11 @@ export function validatePlan(plan: RegisterPlan, masters: MasterOption[]): strin
     const name = it.name.trim()
     if (!name) return '材料名が空の材料があります'
     const n = normName(name)
-    if (existing.has(n)) {
-      return `「${name}」は、材料マスタにすでにあります。「既存の材料にまとめる」で選んでください`
+    // 編集のときは、自分自身と同じ名前でも構わない（ほかの材料と同じ名前だけを、重複とする）
+    if (existing.has(n) && existing.get(n) !== it.masterId) {
+      return it.masterId
+        ? `「${name}」は、材料マスタにほかの材料としてすでにあります。名前を変えてください`
+        : `「${name}」は、材料マスタにすでにあります。「既存の材料にまとめる」で選んでください`
     }
     if (used.has(n)) return `「${name}」が2つあります。名前を変えるか、片方のチェックを外してください`
     used.add(n)
@@ -3489,6 +4965,10 @@ export function validatePlan(plan: RegisterPlan, masters: MasterOption[]): strin
 
     const seenUnits = new Set<string>()
     for (const u of it.units) {
+      if (u.fixed) {
+        seenUnits.add('g')
+        continue
+      }
       const unit = normUnit(u.unit)
       const w = parseNum(u.weight)
       if (!unit && w === null) continue // 何も入っていない行は、無視する
@@ -3503,6 +4983,11 @@ export function validatePlan(plan: RegisterPlan, masters: MasterOption[]): strin
       const v = parseNum(it.nutrients[n2.col])
       if (v !== null && (Number.isNaN(v) || v < 0)) return `「${name}」の${n2.label}は、0以上の数字で入力してください`
     }
+
+    if (it.brand.length > 100 || it.product.length > 100 || it.store.length > 100) {
+      return `「${name}」の銘柄・いつもの商品・購入店は、100文字までにしてください`
+    }
+    if (it.note.length > 500) return `「${name}」のメモは、500文字までにしてください`
   }
 
   for (const ua of plan.unitAdds) {
@@ -3527,7 +5012,7 @@ export async function applyPlan(plan: RegisterPlan, userId: string): Promise<{ c
 
   try {
     for (const it of plan.items) {
-      if (!it.checked || it.linkTo) continue
+      if (!it.checked || it.linkTo || it.masterId) continue // 編集中の材料は、ここでは登録しない（saveEdit で保存する）
       const name = it.name.trim()
       const units = normalizeUnits(it.units)
       const def = units.find((u) => u.isDefault)
@@ -3539,9 +5024,12 @@ export async function applyPlan(plan: RegisterPlan, userId: string): Promise<{ c
         default_unit: def ? def.unit : 'g',
         unit_weight_g: def ? def.weight : 1,
         price_per_100g: parseNum(it.price),
-        nutrition_source: 'ai_estimate',
+        nutrition_source: it.source || 'ai_estimate',
         peak_season_months: it.peakMonths.length > 0 ? it.peakMonths : null,
-        note: 'レシピ取り込み時にAIが推定した値',
+        brand_name: it.brand.trim() || null,
+        usual_product_name: it.product.trim() || null,
+        store_name: it.store.trim() || null,
+        note: it.note.trim() || null,
         created_by: userId,
       }
       for (const n of NUTRIENTS) row[n.col] = parseNum(it.nutrients[n.col])
@@ -3660,6 +5148,9 @@ export function applyToDraft(
 //   ・保存は、この画面から recipes → steps → ingredients の順に行う（途中で失敗したら、作りかけのレシピを消して元に戻す）
 //   ・「未計算になるか」の判定は、レシピ詳細・サーバー側の関数（recipe_nutrition ビュー）と同じルール
 // 今回の変更：
+//   ・何人前をAIが推定したときのフラグ（servingsEstimated）を追加。人数は1〜20
+//   ・AIの推定（調理時間・人数）の注意は、確認画面の欄の横に出すので、注意の一覧からは外す
+// 前回の変更：
 //   ・材料名の末尾の（　）が下ごしらえのときは、名前から外して「下ごしらえ」欄へ移す（splitPrep。ハム（千切り）→ ハム＋千切り）
 //   ・名前が材料マスタと同じ材料は、自動で結び付ける（relinkByName）
 // 前回の変更：
@@ -3707,6 +5198,7 @@ export type Draft = {
   genre: string
   category: string
   servings: string
+  servingsEstimated: boolean // AIが推定した人数か（直すと false になる）
   cookingTime: string
   cookingTimeEstimated: boolean // AIが推定した調理時間か（直すと false になる）
   steps: DraftStep[]
@@ -3857,6 +5349,7 @@ type ServerRecipe = {
   genre: string
   category: string
   servings: number
+  servings_estimated?: boolean
   cooking_time_minutes: number | null
   cooking_time_estimated?: boolean
   steps: ServerStep[]
@@ -3864,7 +5357,7 @@ type ServerRecipe = {
 }
 
 // 材料の登録（次の画面）で解決するので、確認画面では出さない注意
-const STALE_WARNING = /材料マスタに無い材料が|単位がマスタの単位表に無い材料が/
+const STALE_WARNING = /材料マスタに無い材料が|単位がマスタの単位表に無い材料が|AIが材料と工程から推定した目安|AIが材料の分量から推定した目安/
 
 function toDraft(r: ServerRecipe): Draft {
   // 工程は 1,2,3… に振り直し、材料の「使う工程」も同じ番号に直す
@@ -3881,6 +5374,7 @@ function toDraft(r: ServerRecipe): Draft {
     genre: r.genre,
     category: r.category,
     servings: String(r.servings ?? 2),
+    servingsEstimated: r.servings_estimated === true,
     cookingTime: hasTime ? String(r.cooking_time_minutes) : '',
     cookingTimeEstimated: hasTime && r.cooking_time_estimated === true,
     steps: sorted.map((s) => ({
@@ -3943,7 +5437,7 @@ export function validateDraft(d: Draft): string | null {
   if (!d.dishName.trim()) return '料理名を入力してください'
   if (!d.sourceName.trim()) return '参考元を入力してください（例：リュウジ、自作、料理本の名前）'
   const servings = Number(d.servings)
-  if (!Number.isInteger(servings) || servings < 1 || servings > 99) return '人数は1〜99の整数で入力してください'
+  if (!Number.isInteger(servings) || servings < 1 || servings > 20) return '標準の人前は、1〜20の整数で入力してください'
   if (d.cookingTime.trim() !== '') {
     const t = Number(d.cookingTime)
     if (!Number.isInteger(t) || t < 0 || t > 1440) return '調理時間は0以上の整数（分）で入力してください'
@@ -4153,9 +5647,9 @@ export async function replaceRecipePhoto(args: {
 }
 
 ===== src\lib\shoppingAggregate.ts =====
-
 // src/lib/shoppingAggregate.ts（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：材料の「複数単位」対応（ingredient_units）
+// 今回の変更：レシピごとに「何人前つくるか」（献立の planned_servings）で分量を計算できるようにした（RecipeInfo.planned）
+// 前回の変更：材料の「複数単位」対応（ingredient_units）
 //   ・材料マスタに登録された単位（大さじ・小さじ・個・枚・g…）なら、どの単位どうしでも換算して合算できる
 //   ・合算した結果は、その材料の「基準単位」（ingredient_units.is_default）で表示する
 //   ・単位が全部同じときは、これまでどおりそのまま合算（単位は変えない）
@@ -4188,7 +5682,8 @@ export type RawIngredient = {
   } | null
 }
 
-export type RecipeInfo = { id: string; dish_name: string; servings: number }
+// servings＝レシピの標準の人前（分量の基準）／planned＝何人前つくるか（無ければ aggregateIngredients の servings）
+export type RecipeInfo = { id: string; dish_name: string; servings: number; planned?: number | null }
 
 export type AggItem = {
   key: string // 画面内で行を区別するためのキー
@@ -4351,7 +5846,7 @@ function buildItems(g: Group): AggItem[] {
 export function aggregateIngredients(
   raws: RawIngredient[],
   recipes: RecipeInfo[],
-  servings: number,
+  servings?: number,
 ): AggItem[] {
   const recipeMap = new Map(recipes.map((r) => [r.id, r]))
   const groups = new Map<string, Group>()
@@ -4359,7 +5854,8 @@ export function aggregateIngredients(
   for (const raw of raws) {
     const recipe = recipeMap.get(raw.recipe_id)
     if (!recipe) continue
-    const factor = recipe.servings > 0 ? servings / recipe.servings : 1
+    const want = recipe.planned ?? servings ?? recipe.servings // 何人前つくるか
+    const factor = recipe.servings > 0 ? want / recipe.servings : 1
     const itemKey = itemKeyOf(raw.ingredient_master_id, raw.ingredient_name)
 
     let g = groups.get(itemKey)
@@ -4666,10 +6162,14 @@ export function useServings(): [number, (n: number) => void] {
 }
 
 ===== src\pages\MasterPage.tsx =====
-
 // src/pages/MasterPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：ingredient_units テーブル（複数単位の対応）を作成済みであること
 // 今回の変更：
+//  ・検索ボックスの右に「＋」ボタン：材料名をテキストで入力して、AIで追加（栄養素・価格・旬・単位を推定。レシピ取り込みと同じ登録画面）
+//  ・材料を長押しすると、「編集」か「この材料を使うレシピを探す」を選べる
+//      編集：同じ画面で、今の値を直せる。「AIで再取得」で、栄養素・価格・旬・単位をAIの推定値に置き換えられる
+//  ・追加・編集のあとは、一覧を読み込み直す
+// 前回までの変更：
 //  ・材料を開いたとき、「単位」の追加・編集・削除フォームを表示（大さじ・小さじ・個・枚…を何個でも登録）
 //    基準の単位を変えたときは、材料マスタの default_unit / unit_weight_g も自動でそろえる（一覧の「1単位あたり」表示に反映）
 // これまでの修正：
@@ -4679,11 +6179,17 @@ export function useServings(): [number, (n: number) => void] {
 //  ④ いつもの商品の画像を登録（詳細を開く→画像を登録）。一覧では小さく表示し、タップで拡大
 //  ⑤ チップを2段に変更（1段目：すべて・旬のみ／2段目：カテゴリ）
 import { useEffect, useMemo, useState } from 'react';
+import { useOutletContext } from 'react-router-dom';
+import type { Session } from '@supabase/supabase-js';
 import { supabase } from '../supabaseClient';
 import type { IngredientCategory, IngredientMaster } from '../types/ingredient';
 import { NUTRIENT_INFO_LIST, getNutrientInfo } from '../data/nutrientInfo';
 import IngredientUnitsEditor from '../components/IngredientUnitsEditor';
 import type { UnitRow } from '../components/IngredientUnitsEditor';
+import LongPressArea from '../components/LongPressArea';
+import IngredientActionSheet from '../components/IngredientActionSheet';
+import RecipesUsingSheet from '../components/RecipesUsingSheet';
+import MasterIngredientEditor from '../components/MasterIngredientEditor';
 
 const CATEGORIES: IngredientCategory[] = [
   '野菜',
@@ -4722,6 +6228,9 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
 
 // 拡大表示中の画像
 type Lightbox = { url: string; title: string };
+
+// 追加・編集の画面（null＝閉じている）
+type EditorState = { mode: 'add' } | { mode: 'edit'; item: IngredientMaster } | null;
 
 // 数値を「値がある時だけ」表示するための小さなヘルパー
 function fmt(value: number | null, unit: string) {
@@ -4837,6 +6346,7 @@ function errorText(e: unknown): string {
 }
 
 export default function MasterPage() {
+  const { session } = useOutletContext<{ session: Session }>();
   const [items, setItems] = useState<IngredientMaster[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -4853,10 +6363,23 @@ export default function MasterPage() {
   // 材料ごとの単位表（材料ID → 単位の一覧）。読み込みに失敗したときは undefined のまま
   const [unitsByMaster, setUnitsByMaster] = useState<Record<string, UnitRow[]> | null>(null);
   const [unitsFailed, setUnitsFailed] = useState(false);
+  // 長押しメニュー・追加／編集の画面・レシピ検索
+  const [actionTarget, setActionTarget] = useState<IngredientMaster | null>(null);
+  const [editor, setEditor] = useState<EditorState>(null);
+  const [usingTarget, setUsingTarget] = useState<IngredientMaster | null>(null);
+  const [reloadKey, setReloadKey] = useState(0); // 増やすと、一覧を読み込み直す
+  const [toast, setToast] = useState<string | null>(null);
+
+  // 「登録しました」などのメッセージは、3秒で消す
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   useEffect(() => {
     const fetchIngredients = async () => {
-      setLoading(true);
+      if (reloadKey === 0) setLoading(true); // 読み込み直しのときは、一覧を出したままにする
       setErrorMessage(null);
       const { data, error } = await supabase
         .from('ingredient_master')
@@ -4884,6 +6407,7 @@ export default function MasterPage() {
         console.error(unitError);
         setUnitsFailed(true);
       } else {
+        setUnitsFailed(false);
         const grouped: Record<string, UnitRow[]> = {};
         (unitData ?? []).forEach((u) => {
           const row = { ...(u as UnitRow), weight_g: Number((u as UnitRow).weight_g) };
@@ -4906,7 +6430,7 @@ export default function MasterPage() {
       }
     };
     fetchIngredients();
-  }, []);
+  }, [reloadKey]);
 
   const filteredItems = useMemo(() => {
     const keyword = searchText.trim().toLowerCase();
@@ -5028,6 +6552,19 @@ export default function MasterPage() {
     }
   };
 
+  // 材料の名前・カテゴリだけを持つ一覧（追加・編集の名前の重複チェックに使う）
+  const masterOptions = useMemo(
+    () => items.map((i) => ({ id: i.id, name: i.ingredient_name, category: i.category, units: [] as string[] })),
+    [items],
+  );
+
+  // 追加・編集が終わったとき：画面を閉じて、一覧を読み込み直す
+  const handleSaved = (message: string) => {
+    setEditor(null);
+    setToast(message);
+    setReloadKey((k) => k + 1);
+  };
+
   const infoNutrient = infoModalKey ? getNutrientInfo(infoModalKey) : null;
   // 現在プルダウンで選んでいる栄養素（カテゴリ順の時はnull）
   const selectedSortNutrient = sortKey !== 'default' ? getNutrientInfo(sortKey as keyof IngredientMaster) : null;
@@ -5036,13 +6573,25 @@ export default function MasterPage() {
     <div className="min-h-screen bg-gray-50 pb-20">
       {/* 上部固定エリア：検索・絞り込み・並び替え・件数 */}
       <div className="sticky top-0 z-10 bg-white px-4 pt-4 pb-3 shadow-sm">
-        <input
-          type="text"
-          value={searchText}
-          onChange={(e) => setSearchText(e.target.value)}
-          placeholder="材料名・銘柄で検索"
-          className="w-full rounded-full border border-gray-300 px-4 py-2 text-sm focus:border-amber-500 focus:outline-none"
-        />
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            placeholder="材料名・銘柄で検索"
+            className="min-w-0 flex-1 rounded-full border border-gray-300 px-4 py-2 text-sm focus:border-amber-500 focus:outline-none"
+          />
+          {/* 材料をAIで追加 */}
+          <button
+            type="button"
+            onClick={() => setEditor({ mode: 'add' })}
+            aria-label="材料をAIで追加"
+            title="材料をAIで追加"
+            className="shrink-0 rounded-full bg-orange-500 px-3.5 py-1.5 text-base font-bold leading-none text-white active:opacity-80"
+          >
+            ＋
+          </button>
+        </div>
 
         {/* 1段目：すべて・旬のみ */}
         <div className="mt-3 flex gap-2">
@@ -5116,7 +6665,10 @@ export default function MasterPage() {
 
         {/* 件数（左）＋ 「100gあたり」の固定表示（右。各レコードの数値の真上に来る） */}
         <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-          <span>{loading ? '読み込み中…' : `${filteredItems.length}件`}</span>
+          <span>
+            {loading ? '読み込み中…' : `${filteredItems.length}件`}
+            {!loading && <span className="ml-2 text-[10px] text-gray-400">長押しで編集・レシピ検索</span>}
+          </span>
           <span className="rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-600">
             100gあたり
           </span>
@@ -5172,16 +6724,9 @@ export default function MasterPage() {
               return (
                 <div key={item.id} className="rounded-xl bg-white shadow-sm">
                   {/* カード本体（ボタンの中にボタンを入れないよう div + role="button"） */}
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => toggleExpand(item.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        toggleExpand(item.id);
-                      }
-                    }}
+                  <LongPressArea
+                    onTap={() => toggleExpand(item.id)}
+                    onLongPress={() => setActionTarget(item)}
                     className="flex w-full cursor-pointer items-center px-4 py-3 text-left"
                   >
                     {/* 左：①分類＋旬 ②材料名 ③銘柄（すべて左揃え） */}
@@ -5246,7 +6791,7 @@ export default function MasterPage() {
                         </div>
                       )}
                     </div>
-                  </div>
+                  </LongPressArea>
 
                   {/* 展開時：栄養価・単価の詳細 */}
                   {isExpanded && (
@@ -5399,6 +6944,54 @@ export default function MasterPage() {
         )}
       </div>
 
+      {/* 長押しメニュー：編集／この材料を使うレシピを探す */}
+      {actionTarget && (
+        <IngredientActionSheet
+          name={actionTarget.ingredient_name}
+          category={actionTarget.category}
+          onClose={() => setActionTarget(null)}
+          onEdit={() => {
+            setEditor({ mode: 'edit', item: actionTarget });
+            setActionTarget(null);
+          }}
+          onFindRecipes={() => {
+            setUsingTarget(actionTarget);
+            setActionTarget(null);
+          }}
+        />
+      )}
+
+      {/* この材料を使うレシピ */}
+      {usingTarget && (
+        <RecipesUsingSheet
+          master={{ id: usingTarget.id, name: usingTarget.ingredient_name }}
+          onClose={() => setUsingTarget(null)}
+        />
+      )}
+
+      {/* 材料の追加・編集（画面いっぱい） */}
+      {editor && (
+        <MasterIngredientEditor
+          key={editor.mode === 'edit' ? editor.item.id : 'add'}
+          mode={editor.mode}
+          item={editor.mode === 'edit' ? editor.item : undefined}
+          masters={masterOptions}
+          userId={session.user.id}
+          onClose={() => setEditor(null)}
+          onSaved={handleSaved}
+        />
+      )}
+
+      {/* 「登録しました」などのメッセージ */}
+      {toast && (
+        <div
+          className="pointer-events-none fixed inset-x-0 z-[80] flex justify-center px-3"
+          style={{ bottom: 'calc(4.5rem + env(safe-area-inset-bottom))' }}
+        >
+          <div className="rounded-xl bg-gray-900 px-4 py-2.5 text-sm text-white shadow-lg">{toast}</div>
+        </div>
+      )}
+
       {/* 画像の拡大表示（どこをタップしても閉じる） */}
       {lightbox && (
         <div
@@ -5481,8 +7074,13 @@ function NutrientRow({
 }
 
 ===== src\pages\MenuPage.tsx =====
-
 // src/pages/MenuPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：
+//  ・レシピごとに「何人前つくるか」（planned_servings）を入れられるようにした（行の下の －○人前＋）。横に、レシピの標準の人前を表示
+//    献立に入れたときの初期値は、設定画面の「献立に追加したときの人数」。買い物リストの分量は、この人数で計算する
+//  ・カロリー・値段は「1人前」で表示（画面全体の人数切替はなくした）。上の「1食平均」も1人前
+// 前提：13_servings_migration.sql を実行済み
+// 前回の変更：
 // 今回の変更：①家族が候補・確定を変えたとき、すぐ画面に反映（Supabase Realtime）／②空欄メッセージを「レシピ一覧で右スワイプ」に統一（レシピ一覧のスワイプを右向きに変更したため）
 // 前提：09_menu_status_migration.sql（plan_confirmed 列）と 11_cook_logs_migration.sql（cook_logs テーブル）を実行済み
 // 献立画面：日割りなし。「確定」と「候補」の2つのリストを、小さな行（料理名＋引用元）で並べる（ボタンなし・スワイプで操作）
@@ -5491,7 +7089,6 @@ function NutrientRow({
 // 一番上（スクロールしても固定）：
 //   ・1食あたりの平均価格・平均カロリー（食事回数＝確定した「主菜」と「麺・丼・ワンプレート」の数）
 //   ・「🛒 買い物リストに追加」ボタン
-// 人数切替は「確定」見出しの右端（共通設定。一覧・詳細と同じ人数で表示）
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useOutletContext } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
@@ -5501,7 +7098,6 @@ import SwipeRow from '../components/SwipeRow'
 import type { SwipeAction } from '../components/SwipeRow'
 import ServingsStepper from '../components/ServingsStepper'
 import ShoppingAddSheet from '../components/ShoppingAddSheet'
-import { useServings } from '../lib/useServings'
 import { getHouseholdId } from '../lib/household'
 import { todayLocal } from '../lib/dates'
 import { errorText } from '../lib/errorText'
@@ -5519,6 +7115,7 @@ type Recipe = Pick<
   | 'plan_confirmed'
   | 'planned_by'
   | 'planned_at'
+  | 'planned_servings'
 >
 
 type MenuRow = Recipe & {
@@ -5537,6 +7134,11 @@ type Patch = {
 }
 
 type Toast = { message: string; actionLabel: string; onAction: () => void }
+
+// 何人前つくるか（未設定のときは、レシピの標準の人前）
+function plannedOf(r: Pick<Recipe, 'planned_servings' | 'servings'>): number {
+  return r.planned_servings ?? Math.max(1, r.servings || 1)
+}
 
 // 「1回の食事」として数えるサブカテゴリ（主菜と、麺・丼・ワンプレート）
 const MEAL_CATEGORIES = ['主菜', '麺・丼・ワンプレート']
@@ -5581,14 +7183,13 @@ export default function MenuPage() {
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false) // 自分の操作中は、Realtimeでの読み込み直しを止める
   const [toast, setToast] = useState<Toast | null>(null)
-  const [servings, setServings] = useServings()
   const [showAdd, setShowAdd] = useState(false) // 「買い物リストに追加」の確認画面
 
   const load = useCallback(async () => {
     const { data, error: recErr } = await supabase
       .from('recipes')
       .select(
-        'id, dish_name, servings, category, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at',
+        'id, dish_name, servings, category, source_name, cooking_time_minutes, cook_count, is_planned, plan_confirmed, planned_by, planned_at, planned_servings',
       )
       .eq('is_planned', true)
 
@@ -5777,6 +7378,27 @@ export default function MenuPage() {
     })
   }
 
+  // 何人前つくるか：変えるとすぐ保存（失敗したら元に戻す）
+  const setPlannedServings = async (r: MenuRow, n: number) => {
+    const prev = r.planned_servings
+    setRows((list) => list.map((x) => (x.id === r.id ? { ...x, planned_servings: n } : x)))
+    busyRef.current = true
+    const { data, error: updErr } = await supabase
+      .from('recipes')
+      .update({ planned_servings: n })
+      .eq('id', r.id)
+      .select('id')
+    busyRef.current = false
+    if (updErr || !data || data.length === 0) {
+      setRows((list) => list.map((x) => (x.id === r.id ? { ...x, planned_servings: prev } : x)))
+      alert(
+        '人数の保存に失敗しました: ' +
+          (updErr ? errorText(updErr) : '権限を確認してください') +
+          '（13_servings_migration.sql を実行済みか確認してください）',
+      )
+    }
+  }
+
   // 確定／候補に分ける（追加した順に並べる。新しいものが上）
   const { confirmed, candidates } = useMemo(() => {
     const byPlanned = (a: MenuRow, b: MenuRow) => (b.planned_at ?? '').localeCompare(a.planned_at ?? '')
@@ -5794,9 +7416,9 @@ export default function MenuPage() {
     let totalPrice = 0
     let uncertain = false
     for (const r of confirmed) {
-      if (r.kcal != null) totalKcal += r.kcal * servings
+      if (r.kcal != null) totalKcal += r.kcal
       else uncertain = true
-      if (r.price != null) totalPrice += r.price * servings
+      if (r.price != null) totalPrice += r.price
       else uncertain = true
       if (r.unresolved > 0) uncertain = true
     }
@@ -5806,7 +7428,7 @@ export default function MenuPage() {
       avgPrice: meals > 0 ? totalPrice / meals : null,
       uncertain,
     }
-  }, [confirmed, servings])
+  }, [confirmed])
 
   return (
     <div className="min-h-screen bg-gray-50 pb-6">
@@ -5823,7 +7445,7 @@ export default function MenuPage() {
               {' ・ '}
               <b className="text-gray-900">{fmtVal(stats.avgKcal, 'kcal')}</b>
               {stats.uncertain && <span className="text-amber-600">※</span>}
-              <span className="text-gray-400">（{servings}人前）</span>
+              <span className="text-gray-400">（1人前）</span>
             </span>
           ) : (
             <span className="min-w-0 truncate text-right text-gray-400">
@@ -5858,7 +7480,6 @@ export default function MenuPage() {
             title="確定"
             count={confirmed.length}
             hint="→作った ←戻す"
-            trailing={<ServingsStepper value={servings} onChange={setServings} />}
           />
           {confirmed.length === 0 ? (
             <Empty text="確定した料理はありません（候補を右にスワイプ）" />
@@ -5872,7 +7493,7 @@ export default function MenuPage() {
                   onSwipeRight={() => markCooked(r)}
                   onSwipeLeft={() => backToCandidate(r)}
                 >
-                  <MenuLine row={r} servings={servings} />
+                  <MenuLine row={r} onServings={(n) => void setPlannedServings(r, n)} />
                 </SwipeRow>
               ))}
             </div>
@@ -5893,7 +7514,7 @@ export default function MenuPage() {
                   onSwipeRight={() => confirm(r)}
                   onSwipeLeft={() => removeFromMenu(r)}
                 >
-                  <MenuLine row={r} servings={servings} />
+                  <MenuLine row={r} onServings={(n) => void setPlannedServings(r, n)} />
                 </SwipeRow>
               ))}
             </div>
@@ -5904,8 +7525,12 @@ export default function MenuPage() {
       {/* 買い物リストに追加の確認画面（全画面） */}
       {showAdd && (
         <ShoppingAddSheet
-          recipes={confirmed.map((r) => ({ id: r.id, dish_name: r.dish_name, servings: r.servings }))}
-          servings={servings}
+          recipes={confirmed.map((r) => ({
+            id: r.id,
+            dish_name: r.dish_name,
+            servings: r.servings,
+            planned: plannedOf(r),
+          }))}
           userId={userId}
           onClose={() => setShowAdd(false)}
           onAdded={(count) => {
@@ -5973,30 +7598,30 @@ function Empty({ text }: { text: string }) {
   )
 }
 
-// ---------- 献立の1行（コンパクト：料理名＋引用元の2段／右に人数ぶんのカロリー・費用） ----------
-function MenuLine({ row: r, servings }: { row: MenuRow; servings: number }) {
-  const kcal = r.kcal != null ? r.kcal * servings : null
-  const price = r.price != null ? r.price * servings : null
+// ---------- 献立の1行：料理名＋引用元／右に1人前のカロリー・費用。下の段に「何人前つくるか」と標準の人前 ----------
+function MenuLine({ row: r, onServings }: { row: MenuRow; onServings: (n: number) => void }) {
   return (
-    <Link
-      to={`/recipes/${r.id}`}
-      draggable={false}
-      className="flex items-center gap-2 px-3 py-1.5 active:opacity-70"
-    >
-      {/* 左：①料理名 ②引用元（左揃え。長いときは省略） */}
-      <div className="min-w-0 flex-1 text-left">
-        <div className="truncate text-sm font-medium leading-tight text-gray-800">
-          {r.dish_name}
-          {r.unresolved > 0 && <span className="ml-1 text-[10px] font-normal text-amber-600">※</span>}
+    <div className="px-3 py-1.5">
+      <Link to={`/recipes/${r.id}`} draggable={false} className="flex items-center gap-2 active:opacity-70">
+        {/* 左：①料理名 ②引用元（左揃え。長いときは省略） */}
+        <div className="min-w-0 flex-1 text-left">
+          <div className="truncate text-sm font-medium leading-tight text-gray-800">
+            {r.dish_name}
+            {r.unresolved > 0 && <span className="ml-1 text-[10px] font-normal text-amber-600">※</span>}
+          </div>
+          {r.source_name && <div className="truncate text-[11px] leading-tight text-gray-400">{r.source_name}</div>}
         </div>
-        {r.source_name && <div className="truncate text-[11px] leading-tight text-gray-400">{r.source_name}</div>}
+        {/* 右：1人前のカロリー・費用 */}
+        <span className="shrink-0 whitespace-nowrap text-xs font-semibold text-gray-700">
+          {fmtVal(r.kcal, 'kcal')}　{fmtVal(r.price, '円')}
+        </span>
+      </Link>
+      {/* 何人前つくるか（スワイプと区別するため、ボタンだけで操作する） */}
+      <div className="mt-1 flex items-center justify-end gap-2">
+        <span className="text-[10px] text-gray-400">標準{r.servings}人前</span>
+        <ServingsStepper value={plannedOf(r)} onChange={onServings} min={1} max={20} />
       </div>
-
-      {/* 右：人数ぶんのカロリー・費用 */}
-      <span className="shrink-0 whitespace-nowrap text-xs font-semibold text-gray-700">
-        {fmtVal(kcal, 'kcal')}　{fmtVal(price, '円')}
-      </span>
-    </Link>
+    </div>
   )
 }
 
@@ -6007,6 +7632,10 @@ function MenuLine({ row: r, servings }: { row: MenuRow; servings: number }) {
 // 前提：ingredient_units テーブル（複数単位の対応）を作成済みであること
 // 前提：src/lib/recipePhoto.ts と src/lib/ingredientOrder.ts を置いてあること（今回の追加ファイル）
 // 今回の変更：
+//  ・カロリー・値段・栄養素は「1人前」で固定表示（人数で変わらない）
+//  ・材料の人数切替は、このレシピの「標準の人前」（recipes.servings）から始まる（共通設定ではなくなった。画面を開き直すと標準に戻る）
+//  ・献立に追加したときは、設定画面の「人数の初期値」を planned_servings に入れる
+// 前回の変更：
 //  ・写真の右下に「📷 登録／変更」ボタンを追加。選んだ写真は端末で縮めてから保存し、古い写真は消す
 //  ・「材料」表を、買い物リストのカテゴリ順（設定画面の順）に並べ替えた
 //      カテゴリ名は出さず、カテゴリが変わるところの線だけ濃くした。A・Bなどのグループ分けと、下ごしらえ（括弧書き）は、この表では出さない
@@ -6017,7 +7646,7 @@ function MenuLine({ row: r, servings }: { row: MenuRow; servings: number }) {
 //      2行目：料理名。その下に小さく「参照元・時間・カロリー・費用」
 //  ・「履歴」「栄養素」は、ボタンを押すと下から出る画面で表示
 //  ・「追加」は献立候補の追加／外す。押したあとに「元に戻す」付きのメッセージを表示
-//  ・人数切替（－ ○人前 ＋）は「材料」の見出しの右（カロリー・費用・分量が連動。一覧・献立と共通の設定）
+//  ・人数切替（－ ○人前 ＋）は「材料」の見出しの右（材料の分量だけが連動）
 //  ・材料のグループ記号（A・B…）をオレンジの丸バッジで表示（作り方の工程内）。工程の本文中の [A] もバッジにする
 //  ・カロリー／費用／栄養素は recipe_nutrition ビュー（材料マスタから計算）から表示
 //  ・計算できていない材料には「未計算」マーク（判定は材料マスタの単位表 ingredient_units に合わせてある）
@@ -6033,9 +7662,8 @@ import { formatCookedDate } from '../lib/dates'
 import { NUTRIENT_INFO_LIST } from '../data/nutrientInfo'
 import type { NutrientInfo } from '../data/nutrientInfo'
 import ServingsStepper from '../components/ServingsStepper'
-import { useServings } from '../lib/useServings'
 import { normalizeCategoryOrder } from '../lib/categoryOrder'
-import { fetchCategoryOrder, getHouseholdId } from '../lib/household'
+import { defaultPlanServingsFor, fetchCategoryOrder, getHouseholdId } from '../lib/household'
 import { orderByCategory } from '../lib/ingredientOrder'
 import type { OrderedRow } from '../lib/ingredientOrder'
 import { compressForDisplay, replaceRecipePhoto } from '../lib/recipePhoto'
@@ -6063,6 +7691,7 @@ type PlanPatch = {
   plan_confirmed: boolean
   planned_by: string | null
   planned_at: string | null
+  planned_servings: number | null
 }
 type Toast = { message: string; onUndo: () => void }
 
@@ -6135,11 +7764,6 @@ function nv(row: NutritionRow | null, col: string): number | null {
   return typeof v === 'number' ? v : null
 }
 
-// 栄養素（1人前あたり）を、選んだ人数ぶんにして取り出す
-function nvPer(row: NutritionRow | null, col: string, servings: number): number | null {
-  const v = nv(row, col)
-  return v == null ? null : v * servings
-}
 
 // 材料マスタの列名 → ビューの列名（xxx_per_100g → xxx_per_serving）
 function servingCol(key: string): string {
@@ -6203,7 +7827,7 @@ export default function RecipeDetailPage() {
   const [toast, setToast] = useState<Toast | null>(null)
   const [photoBusy, setPhotoBusy] = useState(false) // 料理写真を保存している途中
   const [categoryOrder, setCategoryOrder] = useState<string[]>(normalizeCategoryOrder(null)) // 買い物リストのカテゴリ順
-  const [servings, setServings] = useServings() // 何人前で表示するか（共通設定）
+  const [servings, setServings] = useState(1) // 材料を何人前で表示するか（開いたときは、レシピの標準の人前）
   const imageUrl = useRecipeImage(recipe?.image_path ?? null)
 
   // 「元に戻す」メッセージは4秒で自動的に消す
@@ -6263,6 +7887,7 @@ export default function RecipeDetailPage() {
         return
       }
       setRecipe(recipeResult.data as Recipe)
+      setServings(Math.max(1, (recipeResult.data as Recipe).servings || 1))
 
       // 材料：マスタ結合つきの取得に失敗したときは、結合なしで取り直す（表示は止めない）
       if (ingredientsResult.error) {
@@ -6328,6 +7953,7 @@ export default function RecipeDetailPage() {
       plan_confirmed: recipe.plan_confirmed,
       planned_by: recipe.planned_by,
       planned_at: recipe.planned_at,
+      planned_servings: recipe.planned_servings ?? null,
     }
     const adding = !recipe.is_planned
     const ok = await writePlan({
@@ -6335,6 +7961,7 @@ export default function RecipeDetailPage() {
       plan_confirmed: false,
       planned_by: adding ? session.user.id : null,
       planned_at: adding ? new Date().toISOString() : null,
+      planned_servings: adding ? await defaultPlanServingsFor(session.user.id) : null,
     })
     if (!ok) return
     setToast({
@@ -6432,11 +8059,9 @@ export default function RecipeDetailPage() {
     )
   }
 
-  // ビューの値は「1人前あたり」。選んだ人数ぶんに掛けて表示する
+  // カロリー・費用・栄養素は、いつも1人前（ビューの値そのまま）
   const kcalPer = nv(nutrition, 'calorie_per_serving')
   const costPer = nv(nutrition, 'price_per_serving')
-  const kcalN = kcalPer != null ? kcalPer * servings : null
-  const costN = costPer != null ? costPer * servings : null
   const factor = servings / recipe.servings // 材料の分量を増減する倍率
   const unresolvedCount = unresolvedSet.size
   const uncertain = unresolvedCount > 0 || nutritionFailed // 計算に含まれていない材料がある
@@ -6509,11 +8134,11 @@ export default function RecipeDetailPage() {
           <span className="shrink-0 whitespace-nowrap">
             {recipe.source_name ? '・' : ''}⏱ {recipe.cooking_time_minutes != null ? `${recipe.cooking_time_minutes}分` : '―'}
             {' ・ '}
-            {fmtVal(kcalN, 'kcal')}
+            {fmtVal(kcalPer, 'kcal')}
             {' ・ '}
-            {fmtVal(costN, '円')}
+            {fmtVal(costPer, '円')}
             {uncertain && <span className="text-amber-600">※</span>}
-            <span className="text-gray-400">（{servings}人前）</span>
+            <span className="text-gray-400">（1人前）</span>
           </span>
         </p>
       </header>
@@ -6561,11 +8186,19 @@ export default function RecipeDetailPage() {
           <div className="mb-2 flex items-center justify-between gap-2">
             <h2 className="font-semibold text-gray-800">
               材料
-              {servings !== recipe.servings && (
-                <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
+              {servings !== recipe.servings ? (
+                <button
+                  type="button"
+                  onClick={() => setServings(recipe.servings)}
+                  className="ml-2 rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-normal text-gray-500 active:bg-gray-200"
+                >
+                  標準{recipe.servings}人前に戻す
+                </button>
+              ) : (
+                <span className="ml-2 text-xs font-normal text-gray-400">標準</span>
               )}
             </h2>
-            <ServingsStepper value={servings} onChange={setServings} />
+            <ServingsStepper value={servings} onChange={setServings} max={20} />
           </div>
           {ingredients.length === 0 ? (
             <p className="text-sm text-gray-400">材料情報はありません。</p>
@@ -6649,21 +8282,15 @@ export default function RecipeDetailPage() {
 
       {/* 栄養素（カロリー・費用の内訳 ＋ 栄養価） */}
       {sheet === 'nutrition' && (
-        <Sheet title={`栄養素（${servings}人前）`} onClose={() => setSheet(null)}>
+        <Sheet title="栄養素（1人前）" onClose={() => setSheet(null)}>
           <div className="grid grid-cols-2 gap-3">
             <div className="rounded-xl bg-gray-50 p-3 text-center">
-              <p className="text-xs text-gray-400">カロリー({servings}人前)</p>
-              <p className="text-lg font-semibold text-gray-800">{fmtVal(kcalN, 'kcal')}</p>
-              {servings !== 1 && kcalPer != null && (
-                <p className="text-xs text-gray-400">1人前 {fmtVal(kcalPer, 'kcal')}</p>
-              )}
+              <p className="text-xs text-gray-400">カロリー(1人前)</p>
+              <p className="text-lg font-semibold text-gray-800">{fmtVal(kcalPer, 'kcal')}</p>
             </div>
             <div className="rounded-xl bg-gray-50 p-3 text-center">
-              <p className="text-xs text-gray-400">費用({servings}人前)</p>
-              <p className="text-lg font-semibold text-gray-800">{fmtVal(costN, '円')}</p>
-              {servings !== 1 && costPer != null && (
-                <p className="text-xs text-gray-400">1人前 {fmtVal(costPer, '円')}</p>
-              )}
+              <p className="text-xs text-gray-400">費用(1人前)</p>
+              <p className="text-lg font-semibold text-gray-800">{fmtVal(costPer, '円')}</p>
             </div>
           </div>
           {nutritionFailed && (
@@ -6689,7 +8316,7 @@ export default function RecipeDetailPage() {
                     key={String(n.key)}
                     label={n.label}
                     indent={INDENT_KEYS.includes(String(n.key))}
-                    value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
+                    value={fmtVal(nv(nutrition, servingCol(String(n.key))), n.unit)}
                   />
                 ))}
                 <div className="mb-1 mt-3 border-t border-gray-100 pt-2 text-xs font-semibold text-gray-500">
@@ -6699,7 +8326,7 @@ export default function RecipeDetailPage() {
                   <NutrientLine
                     key={String(n.key)}
                     label={n.label}
-                    value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
+                    value={fmtVal(nv(nutrition, servingCol(String(n.key))), n.unit)}
                   />
                 ))}
                 <p className="mt-3 text-[11px] text-gray-400">
@@ -7421,14 +9048,15 @@ export default function RecipeImportPage() {
 
 ===== src\pages\RecipeListPage.tsx =====
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：検索ボックスの右に、レシピ取り込み（テキスト・写真）へ進む「＋」ボタンを追加（それ以外は前と同じ）
+// 今回の変更：カロリー・値段は「1人前」で固定表示（人数切替をなくした）。献立に追加したときは、設定画面の「人数の初期値」を planned_servings に入れる
+// 前回の変更：検索ボックスの右に、レシピ取り込み（テキスト・写真）へ進む「＋」ボタンを追加（それ以外は前と同じ）
 // 今回の変更：リスト表示のスワイプを「右スワイプ」で献立候補に追加／献立から外す に変更（これまでは左スワイプ）
 // 前提：recipe_nutrition ビュー（01）と、recipes.plan_confirmed 列（09）を作成済みであること
 // 機能：
 //  ・検索ボックスの右横に、写真／リスト切替
 //  ・ジャンル（すべて・和食・洋食・中華・エスニック・その他）を1行、サブカテゴリ（6分類）を1行
 //  ・リスト表示：カードを右へスワイプ →「献立候補」に追加／献立から外す（離すと確定）
-//  ・値は、右上の人数（共通設定）あたりで表示。「－ 2人前 ＋」で変更（詳細・献立画面と共通）
+//  ・カロリー・値段は、いつも1人前で表示
 //  ・写真表示：サムネ右上の＋ボタンで 候補に追加／外す
 //  ・追加／解除のあとに「元に戻す」付きのメッセージを数秒表示
 //  ・カードのバッジ：「候補」「確定」で献立の状態を表示（確定・作ったは献立画面で行う）
@@ -7441,8 +9069,7 @@ import type { IngredientMaster } from '../types/ingredient'
 import { NUTRIENT_INFO_LIST, getNutrientInfo } from '../data/nutrientInfo'
 import SwipeRow from '../components/SwipeRow'
 import type { SwipeAction } from '../components/SwipeRow'
-import ServingsStepper from '../components/ServingsStepper'
-import { useServings } from '../lib/useServings'
+import { defaultPlanServingsFor } from '../lib/household'
 
 // 一覧で使う項目だけ抜き出す
 type Recipe = Pick<
@@ -7587,11 +9214,6 @@ function fmtVal(value: number | null, unit: string): string {
   return `${roundSmart(value)}${unit}`
 }
 
-// ビューの値は「1人前あたり」。表示する人数ぶんに掛ける
-function nvN(r: RecipeRow, col: string, servings: number): number | null {
-  const v = nv(r, col)
-  return v == null ? null : v * servings
-}
 
 // 献立の状態：候補／確定／なし
 function planLabel(r: Pick<Recipe, 'is_planned' | 'plan_confirmed'>): '確定' | '候補' | null {
@@ -7610,7 +9232,6 @@ export default function RecipeListPage() {
   const [error, setError] = useState<string | null>(null)
   const [nutritionNotice, setNutritionNotice] = useState<string | null>(null)
   const [toast, setToast] = useState<Toast | null>(null)
-  const [servings, setServings] = useServings() // 何人前で表示するか（共通設定）
 
   const [keyword, setKeyword] = useState('')
   const [genreFilter, setGenreFilter] = useState<GenreFilter>('すべて')
@@ -7690,6 +9311,8 @@ export default function RecipeListPage() {
   ): Promise<boolean> => {
     const prev = recipes.find((r) => r.id === id)
     setRecipes((list) => list.map((r) => (r.id === id ? { ...r, ...state } : r)))
+    // 献立に入れるときは「何人前つくるか」の初期値（設定画面）を入れる。外すときは空にする
+    const plannedServings = state.is_planned ? await defaultPlanServingsFor(session.user.id) : null
     const { data, error: updError } = await supabase
       .from('recipes')
       .update({
@@ -7697,6 +9320,7 @@ export default function RecipeListPage() {
         plan_confirmed: state.plan_confirmed,
         planned_by: state.is_planned ? session.user.id : null,
         planned_at: state.is_planned ? new Date().toISOString() : null,
+        planned_servings: plannedServings,
       })
       .eq('id', id)
       .select('id')
@@ -7918,7 +9542,7 @@ export default function RecipeListPage() {
           <span className="min-w-0 truncate text-[10px] text-gray-400">
             {viewMode === 'list' ? '右スワイプで献立候補に追加 →' : '右上の＋で献立候補に追加'}
           </span>
-          <ServingsStepper value={servings} onChange={setServings} />
+          <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-gray-600">1人前</span>
         </div>
       </header>
 
@@ -7938,7 +9562,6 @@ export default function RecipeListPage() {
                   recipe={r}
                   imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
                   sortNutrient={sortNutrientInfo}
-                  servings={servings}
                   onTogglePlanned={() => togglePlanned(r)}
                 />
               ))}
@@ -7959,7 +9582,6 @@ export default function RecipeListPage() {
                     recipe={r}
                     imageUrl={r.image_path ? imageUrls[r.image_path] : undefined}
                     sortNutrient={sortNutrientInfo}
-                    servings={servings}
                   />
                 </SwipeRow>
               ))}
@@ -8014,18 +9636,16 @@ function PhotoCard({
   recipe: r,
   imageUrl,
   sortNutrient,
-  servings,
   onTogglePlanned,
 }: {
   recipe: RecipeRow
   imageUrl?: string
   sortNutrient: SortNutrientInfo
-  servings: number
   onTogglePlanned: () => void
 }) {
   const title = r.source_name ? `${r.dish_name} / ${r.source_name}` : r.dish_name
-  const kcal = nvN(r, 'calorie_per_serving', servings)
-  const price = nvN(r, 'price_per_serving', servings)
+  const kcal = nv(r, 'calorie_per_serving')
+  const price = nv(r, 'price_per_serving')
   const unresolved = unresolvedCount(r)
   const label = planLabel(r)
 
@@ -8056,7 +9676,7 @@ function PhotoCard({
         <p className="mt-1.5 line-clamp-2 text-[13px] font-bold leading-snug text-gray-900">{title}</p>
         <p className="mt-0.5 text-[11px] text-gray-500">
           {sortNutrient
-            ? `${sortNutrient.label} ${fmtVal(nvN(r, sortNutrient.col, servings), sortNutrient.unit)}`
+            ? `${sortNutrient.label} ${fmtVal(nv(r, sortNutrient.col), sortNutrient.unit)}`
             : fmtVal(kcal, 'kcal')}
           {' ・ '}
           {fmtVal(price, '円')}
@@ -8085,16 +9705,14 @@ function ListCard({
   recipe: r,
   imageUrl,
   sortNutrient,
-  servings,
 }: {
   recipe: RecipeRow
   imageUrl?: string
   sortNutrient: SortNutrientInfo
-  servings: number
 }) {
   const genre = genreOf(r)
-  const kcal = nvN(r, 'calorie_per_serving', servings)
-  const price = nvN(r, 'price_per_serving', servings)
+  const kcal = nv(r, 'calorie_per_serving')
+  const price = nv(r, 'price_per_serving')
   const unresolved = unresolvedCount(r)
 
   return (
@@ -8125,7 +9743,7 @@ function ListCard({
           <div className="flex items-baseline justify-end gap-3 text-sm font-semibold">
             {sortNutrient ? (
               <span className="text-amber-600">
-                {sortNutrient.label} {fmtVal(nvN(r, sortNutrient.col, servings), sortNutrient.unit)}
+                {sortNutrient.label} {fmtVal(nv(r, sortNutrient.col), sortNutrient.unit)}
               </span>
             ) : (
               <span className="text-gray-700">{fmtVal(kcal, 'kcal')}</span>
@@ -8178,7 +9796,8 @@ function Chip({
 
 ===== src\pages\SettingsPage.tsx =====
 // src/pages/SettingsPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：
+// 今回の変更：「献立に追加したときの人数」（初期値）の設定を追加
+// 前回の変更：
 //  ・各項目を、タップで開閉するカードにした（最初は全部閉じている。買い物リストのカテゴリ順が場所をとっていたため）
 //  ・「FaceID / パスキー」の登録ボタンを追加（第16版の画面構成変更で消えていた分）
 //  ・「Gemini APIキー」の登録欄を追加（写真・テキストからレシピを取り込む機能用。各自が自分のキーを登録する）
@@ -8190,6 +9809,7 @@ import SettingsSection from '../components/SettingsSection'
 import PasskeySettings from '../components/PasskeySettings'
 import GeminiKeySettings from '../components/GeminiKeySettings'
 import ShoppingCategoryOrderSettings from '../components/ShoppingCategoryOrderSettings'
+import DefaultPlanServingsSettings from '../components/DefaultPlanServingsSettings'
 
 export default function SettingsPage() {
   const { session } = useOutletContext<{ session: Session }>()
@@ -8205,6 +9825,10 @@ export default function SettingsPage() {
 
       <SettingsSection icon="✨" title="Gemini APIキー" description="写真・テキストからレシピを取り込むためのキー">
         <GeminiKeySettings />
+      </SettingsSection>
+
+      <SettingsSection icon="🍽" title="献立に追加したときの人数" description="何人前つくるかの初期値（献立画面で、レシピごとに変えられる）">
+        <DefaultPlanServingsSettings />
       </SettingsSection>
 
       <SettingsSection icon="🛒" title="買い物リストのカテゴリ順" description="カテゴリの並び順を変える">
@@ -8899,7 +10523,8 @@ export interface IngredientMaster {
 }
 ===== src\types\recipe.ts =====
 // src/types/recipe.ts（ファイル全体。これで丸ごと置き換えてください）
-// 変更点：Ingredient型に step_id・group_label、Step型に tip を追加（12_ingredients_by_step.sql に対応）
+// 今回の変更：Recipe型に planned_servings（献立で何人前つくるか）を追加（13_servings_migration.sql に対応）
+// 前回の変更点：Ingredient型に step_id・group_label、Step型に tip を追加（12_ingredients_by_step.sql に対応）
 // （以前の変更点：Recipe型に plan_confirmed を追加）
 // ファイル: src/types/recipe.ts
 // レシピ関連の型定義
@@ -8925,6 +10550,7 @@ export type Recipe = {
   plan_confirmed: boolean             // ★追加：献立に確定済み（is_planned が true のときだけ意味を持つ）
   planned_by: string | null
   planned_at: string | null
+  planned_servings: number | null    // 献立で何人前つくるか（献立に入れたときに初期値が入る）
   registration_method: string | null
   created_by: string | null
   updated_by: string | null
@@ -9457,7 +11083,8 @@ Deno.serve(async (req) => {
 // 必要なSecrets: GEMINI_MODEL(モデル名。全員共通)
 // APIキーは「呼んだ人」ごとに user_gemini_keys テーブルから読む(各自が自分のキーを登録)。
 // SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY は Supabase が自動で渡す。
-// 今回の変更：調理時間が書かれていないときは、材料と工程からAIが推定する(cooking_time_estimated=true で返す)
+// 今回の変更：何人前か書かれていないときは、材料の分量からAIが推定する(servings_estimated=true で返す)
+// 前回の変更：調理時間が書かれていないときは、材料と工程からAIが推定する(cooking_time_estimated=true で返す)
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
@@ -9560,6 +11187,7 @@ const responseSchema = {
     genre: { type: "STRING", enum: [...GENRES] },
     category: { type: "STRING", enum: [...CATEGORIES] },
     servings: { type: "INTEGER" },
+    servings_estimated: { type: "BOOLEAN" },
     cooking_time_minutes: { type: "INTEGER", nullable: true },
     cooking_time_estimated: { type: "BOOLEAN" },
     steps: {
@@ -9612,7 +11240,8 @@ function buildSystemPrompt(masterLines: string): string {
 - 入力に書かれていない情報を作らない(調理時間だけは、下の「調理時間」のとおり推定してよい)。読み取れない・書かれていない項目は null か空にし、warnings に理由を書く。
 - 文章は原文の言葉をできるだけそのまま使う。言い換えたり、材料名を勝手に詳しくしたりしない(例:原文が「油」なら「油」のまま。「サラダ油」にしない)。
 - dish_name は料理名のみ(「簡単!」などの装飾は除く)。
-- servings は入力に書かれた人数(○人前・○人分)をそのまま整数で。換算しない。書かれていなければ 2 にして warnings に書く。
+- servings は、この分量が何人前か(整数)。入力に「○人前」「○人分」と書かれていれば、その値をそのまま入れ(換算しない)、servings_estimated は false。
+- 書かれていなければ、材料の分量から、日本の家庭料理の一般的な1人前の量をもとに推定し(例:肉・魚が200〜300gなら2人前、ご飯1合なら2人前、麺1玉なら1人前)、servings_estimated を true にする。推定した旨は warnings に書かなくてよい。
 - genre は ${GENRES.join(" / ")} から1つ。category は ${CATEGORIES.join(" / ")} から1つ。
 - source_name は、投稿者・著者・店名など作った人が分かるときだけ。分からなければ null。
 
@@ -9878,6 +11507,12 @@ Deno.serve(async (req) => {
       ? Math.round(timeRaw)
       : null;
   const cookingEstimated = cookingTime !== null && parsed.cooking_time_estimated === true;
+  const servingsOk = Number.isInteger(parsed.servings) && parsed.servings > 0 && parsed.servings <= 20;
+  const servingsEstimated = !servingsOk || parsed.servings_estimated === true;
+  const servings = servingsOk ? parsed.servings : 2;
+  if (servingsEstimated) {
+    warnings.push(`何人前(${servings}人前)は、AIが材料の分量から推定した目安です。実際に合わせて直してください`);
+  }
   if (cookingEstimated) {
     warnings.push(`調理時間(約${cookingTime}分)は、AIが材料と工程から推定した目安です。実際に合わせて直してください`);
   }
@@ -9887,7 +11522,8 @@ Deno.serve(async (req) => {
     source_name: parsed.source_name ? String(parsed.source_name).trim() : null,
     genre: (GENRES as readonly string[]).includes(parsed.genre) ? parsed.genre : "その他",
     category: (CATEGORIES as readonly string[]).includes(parsed.category) ? parsed.category : "主菜",
-    servings: Number.isInteger(parsed.servings) && parsed.servings > 0 ? parsed.servings : 2,
+    servings,
+    servings_estimated: servingsEstimated,
     cooking_time_minutes: cookingTime,
     cooking_time_estimated: cookingEstimated,
     registration_method: "ai",
