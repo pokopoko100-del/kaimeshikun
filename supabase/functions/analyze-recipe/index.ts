@@ -63,6 +63,30 @@ function isNumericQty(q: string): boolean {
   return /^\d+(\.\d+)?$/.test(n) || /^\d+\/\d+$/.test(n);
 }
 
+// 材料名の末尾の（　）が「下ごしらえ」なら、材料名から外して下ごしらえの欄へ移す。
+//   例：「ハム（千切り）」→ 名前「ハム」・下ごしらえ「千切り」／「しょうが(おろし)」→「しょうが」・「おろし」
+//   「有塩」「白」など、材料の種類を表すものは、名前に残す。
+const KEEP_IN_NAME = /^(有塩|無塩|無調整|国産|白|赤|黒|青|黄|生|乾燥|粉|粉末|顆粒|液体|チューブ|缶|缶詰|瓶|絹|木綿|薄口|濃口|合わせ|赤だし|白だし)$/;
+function splitPrep(name: string, prep: string | null | undefined): { name: string; preparation: string | null } {
+  let base = String(name ?? "").trim();
+  const preps: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    const m = base.match(/^(.+?)\s*[（(]([^）)]*)[）)]\s*$/);
+    if (!m) break;
+    const inner = m[2].trim();
+    if (inner === "") {
+      base = m[1].trim();
+      continue;
+    }
+    if (KEEP_IN_NAME.test(inner.normalize("NFKC"))) break;
+    preps.unshift(inner);
+    base = m[1].trim();
+  }
+  const own = String(prep ?? "").trim();
+  const all = [...preps, ...(own && !preps.includes(own) ? [own] : [])];
+  return { name: base, preparation: all.length > 0 ? all.join("・") : null };
+}
+
 // 工程の本文の角かっこを整える。
 // アプリは [A] のような「英大文字1文字」だけをグループ記号のバッジにする。
 // それ以外の [サラダ油] などは、角かっこを外して中身だけ残す。
@@ -145,7 +169,8 @@ function buildSystemPrompt(masterLines: string): string {
 - 工程が全く読み取れず、推定できないときだけ null(cooking_time_estimated は false)。
 
 # 材料
-- ingredient_name は入力に書かれた名前。master_name は下の「材料マスタ」の名前と完全一致するものがあるときだけ入れる。似ているだけ・無いときは null(無理に合わせない)。
+- ingredient_name は「材料の名前だけ」。切り方・下ごしらえ・状態は、名前に含めず、かっこにも入れず、preparation に入れる(例:原文「ハム(千切り)」→ ingredient_name="ハム"・preparation="千切り"、「しょうが(おろし)」→ "しょうが"・"おろし"、「玉ねぎ(みじん切り)」→ "玉ねぎ"・"みじん切り")。
+- master_name は下の「材料マスタ」の名前と完全一致するものがあるときだけ入れる。似ているだけ・無いときは null(無理に合わせない)。
 - quantity は半角数字だけの文字列にする(例:"2" "0.5" "1/2")。「1と1/2」は "1.5"、「2〜3」は中間の "2.5" にして warnings に書く。
 - 「少々」「適量」「適宜」「ひとつまみ」はそのまま quantity に入れ、unit は空文字。
 - unit は単位だけ(例:"g" "大さじ" "小さじ" "個" "ml")。「大さじ1」は quantity="1", unit="大さじ"。マスタに該当材料があるときは、その材料の単位の中から選ぶ。合う単位が無いときは書かれたままの単位にする。
@@ -337,13 +362,14 @@ Deno.serve(async (req) => {
   const ingredients = (Array.isArray(parsed.ingredients) ? parsed.ingredients : []).map(
     // deno-lint-ignore no-explicit-any
     (ing: any, i: number) => {
-      const name = String(ing.ingredient_name ?? "").trim();
+      const split = splitPrep(ing.ingredient_name, ing.preparation);
+      const name = split.name;
       const quantity = String(ing.quantity ?? "").normalize("NFKC").trim();
       const unit = normUnit(String(ing.unit ?? ""));
 
       // マスタ照合:AIが選んだ名前 → 無ければ材料名そのもの
       let master: MasterRow | undefined;
-      if (ing.master_name) master = byName.get(norm(String(ing.master_name)));
+      if (ing.master_name) master = byName.get(norm(splitPrep(ing.master_name, null).name));
       if (!master && name) master = byName.get(norm(name));
 
       const availableUnits = master
@@ -370,7 +396,7 @@ Deno.serve(async (req) => {
         ingredient_master_id: master ? master.id : null,
         quantity,
         unit,
-        preparation: ing.preparation ? String(ing.preparation) : null,
+        preparation: split.preparation,
         step_number: stepNo,
         group_label: group,
         status,

@@ -89,8 +89,9 @@ function validWeight(v: unknown): number | null {
 }
 
 // ---------- Gemini に渡すスキーマ ----------
+// 栄養素と価格は「必須の数値」にして、AIが null（不明）で逃げられないようにする
 const nutrientProps = Object.fromEntries(
-  NUTRIENTS.map((n) => [n.col, { type: "NUMBER", nullable: true }]),
+  NUTRIENTS.map((n) => [n.col, { type: "NUMBER" }]),
 );
 
 const responseSchema = {
@@ -103,7 +104,7 @@ const responseSchema = {
         properties: {
           key: { type: "STRING" },
           category: { type: "STRING", enum: [...CATEGORIES] },
-          price_per_100g: { type: "NUMBER", nullable: true },
+          price_per_100g: { type: "NUMBER" },
           peak_season_months: { type: "ARRAY", items: { type: "INTEGER" } },
           default_unit: { type: "STRING" },
           units: {
@@ -119,7 +120,15 @@ const responseSchema = {
           },
           ...nutrientProps,
         },
-        required: ["key", "category", "peak_season_months", "default_unit", "units"],
+        required: [
+          "key",
+          "category",
+          "price_per_100g",
+          "peak_season_months",
+          "default_unit",
+          "units",
+          ...NUTRIENTS.map((n) => n.col),
+        ],
       },
     },
     unit_results: {
@@ -140,15 +149,20 @@ const responseSchema = {
 const SYSTEM_PROMPT = `あなたは、日本の家庭向け料理アプリの「食材データ作成」担当です。
 渡された食材ごとに、栄養・価格・単位の目安を、指定のJSONスキーマで出力してください。
 
-# 栄養素(すべて「その食材100gあたり」)
-- 日本食品標準成分表(八訂)の値を基準に、一般的な食材としての値を答える。生鮮食品は「生」、調味料や加工品は市販の一般的なもの。
+# 栄養素(すべて「その食材100gあたり」。21項目すべてに、必ず数値を入れる)
+- 日本食品標準成分表(八訂)の値を基準に、近い食材の値から推定して答える。生鮮食品は「生」、調味料や加工品は市販の一般的なもの。
+- 成分表で「Tr(微量)」「-(未測定)」の項目や、含まれないはずの項目は 0 を入れる。分からないからといって、空にしない。
+- 正確な値が分からないときは、同じ種類の食材(例:ハム→ロースハム、しょうが→しょうが生、きのこ→しいたけ)の値を参考に、もっともらしい値を入れる。目安でよい。
 - 単位:calorie=kcal / protein・fat・carbohydrate・sugar・dietary_fiber・salt=g / vitamin_a=µg(レチノール活性当量) / vitamin_b1・b2・b6・c・e=mg / vitamin_b12・d・folate=µg / calcium・iron・zinc・potassium・magnesium=mg
-- sugar は糖質(炭水化物から食物繊維を引いた値)。salt は食塩相当量。
-- 含まないことが明らかな項目は 0。分からない項目は null(推測で埋めない)。
-- たんぱく質+脂質+炭水化物は100gを超えない。
+- sugar は糖質(炭水化物から食物繊維を引いた値)。salt は食塩相当量(ナトリウムmg×2.54÷1000)。
+- たんぱく質+脂質+炭水化物は100gを超えない。糖質と食物繊維は炭水化物を超えない。カロリーは、たんぱく質×4+脂質×9+炭水化物(食物繊維を除く)×4 の近くにする。
+- 水・お茶・塩など、栄養がほぼ無い食材は、全項目 0 に近い値でよい。
 
-# 価格
-- price_per_100g は、日本のスーパーでの一般的な価格を、100gあたりの円(整数)で。分からなければ null。
+# 価格(必ず数値を入れる)
+- price_per_100g は、日本のスーパーでの一般的な価格を、100gあたりの円(整数)で推定する。必ず1以上の数値を入れる。
+- 液体・調味料は「容量あたりの価格 ÷ 重さ」で100gあたりに換算する(例:醤油1L約400円・約1.2kg → 約33円)。
+- 1個・1本・1パックで売られる食材は、1個あたりの価格 ÷ 重さ(g) × 100 で換算する。
+- 分からないときも、近い食材から推定した値を入れる(0や空にしない)。
 
 # 旬
 - peak_season_months は、日本で旬の月(1〜12の整数)。通年出回るもの・加工品・調味料は空の配列。
@@ -190,6 +204,8 @@ function cleanItem(raw: any, req: ReqItem) {
       nutrients[n.col] = round(v, 2);
     }
   }
+  const emptyCount = NUTRIENTS.filter((n) => nutrients[n.col] === null).length;
+  if (emptyCount >= 5) warnings.push(`栄養素のうち${emptyCount}項目が空欄です。必要なら入力してください`);
   const p = nutrients.protein_g_per_100g;
   const f = nutrients.fat_g_per_100g;
   const c = nutrients.carbohydrate_g_per_100g;
@@ -208,6 +224,7 @@ function cleanItem(raw: any, req: ReqItem) {
   // 価格
   const priceRaw = toNum(raw?.price_per_100g);
   const price = priceRaw !== null && priceRaw > 0 && priceRaw <= 100000 ? Math.round(priceRaw) : null;
+  if (price === null) warnings.push("価格をAIが推定できませんでした。入力してください");
 
   // 旬（12か月すべて・空は通年として扱う）
   const months = [

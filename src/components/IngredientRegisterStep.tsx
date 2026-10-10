@@ -1,4 +1,5 @@
-// src/components/IngredientRegisterStep.tsx（新規作成）
+// src/components/IngredientRegisterStep.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：栄養素を3列で表示（カードの端まで幅を使う）／栄養素の「入力済み／空欄」の数を表示
 // レシピ取り込みの「材料の登録」画面の中身
 //   ・AIが読み取ったレシピに、材料マスタに無い材料（や、マスタに無い単位）があるとき、確認・修正の前に表示する
 //   ・栄養素・カロリー・価格・旬・単位（1単位が何gか）は、AIが推定した値が入っている。直してから登録できる
@@ -16,6 +17,9 @@ export type AiStatus = 'analyzing' | 'ready' | 'failed'
 const INPUT_BASE =
   'rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-amber-500 focus:outline-none'
 const INPUT = `w-full ${INPUT_BASE}`
+// 栄養素の入力欄（3列で並べるので、左右の余白を少し狭くする）
+const NUTRIENT_INPUT =
+  'w-full rounded-lg border border-gray-300 bg-white px-2 py-2 text-sm focus:border-amber-500 focus:outline-none'
 
 const UNIT_SUGGESTIONS = ['個', '枚', '本', '片', 'かけ', '玉', '束', '袋', 'パック', '缶', '丁', '切れ', '尾', 'つまみ', '大さじ', '小さじ', 'ml', 'cc']
 
@@ -225,6 +229,7 @@ function ItemCard({
   const similar = useMemo(() => similarMasters(it.name, masters), [it.name, masters])
   const linked = it.linkTo !== ''
   const disabled = !it.checked
+  const filledCount = NUTRIENTS.filter((n) => it.nutrients[n.col].trim() !== '').length
 
   const setUnit = (key: string, patch: Partial<RegUnit>) =>
     onPatch({ units: it.units.map((u) => (u.key === key ? { ...u, ...patch } : u)) })
@@ -370,26 +375,28 @@ function ItemCard({
             </button>
           </div>
 
-          {/* 栄養素・旬 */}
-          <details>
+          {/* 栄養素・旬（左の字下げを打ち消して、カードの幅いっぱいに3列で並べる） */}
+          <details className="-ml-6">
             <summary className="cursor-pointer text-xs font-semibold text-gray-600">
               栄養素（100gあたり）・旬を確認する
-              {it.nutrients.calorie_per_100g !== '' && (
-                <span className="ml-1 font-normal text-gray-400">　{it.nutrients.calorie_per_100g}kcal</span>
-              )}
+              <span className="ml-1 font-normal text-gray-400">
+                {it.nutrients.calorie_per_100g !== '' && `${it.nutrients.calorie_per_100g}kcal ・ `}
+                入力済み{filledCount}／{NUTRIENTS.length}
+              </span>
             </summary>
 
-            <div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-2">
+            <div className="mt-2 grid grid-cols-3 gap-x-1.5 gap-y-2">
               {NUTRIENTS.map((n) => (
-                <label key={n.col} className="block">
-                  <span className="mb-0.5 block text-[11px] text-gray-500">
-                    {n.label}（{n.unit}）
+                <label key={n.col} className="block min-w-0">
+                  <span className="mb-0.5 block text-[10px] leading-tight text-gray-500">
+                    {n.label}
+                    <span className="text-gray-400">（{n.unit}）</span>
                   </span>
                   <input
-                    className={INPUT}
+                    className={NUTRIENT_INPUT}
                     value={it.nutrients[n.col]}
                     inputMode="decimal"
-                    placeholder="不明は空欄"
+                    placeholder="空欄"
                     onChange={(e) => onPatch({ nutrients: { ...it.nutrients, [n.col]: e.target.value } })}
                   />
                 </label>

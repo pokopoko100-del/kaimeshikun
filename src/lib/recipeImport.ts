@@ -4,6 +4,9 @@
 //   ・保存は、この画面から recipes → steps → ingredients の順に行う（途中で失敗したら、作りかけのレシピを消して元に戻す）
 //   ・「未計算になるか」の判定は、レシピ詳細・サーバー側の関数（recipe_nutrition ビュー）と同じルール
 // 今回の変更：
+//   ・材料名の末尾の（　）が下ごしらえのときは、名前から外して「下ごしらえ」欄へ移す（splitPrep。ハム（千切り）→ ハム＋千切り）
+//   ・名前が材料マスタと同じ材料は、自動で結び付ける（relinkByName）
+// 前回の変更：
 //   ・調理時間をAIが推定したときのフラグ（cookingTimeEstimated）を追加
 //   ・保存のときに、料理写真（表示用）も一緒に保存できるようにした（saveDraft の3つ目の引数）
 //   ・関数の呼び出しを callFunction にまとめた／写真を縮める処理は recipePhoto に移した
@@ -74,6 +77,45 @@ export function circled(n: number): string {
 // 名前の比較用（全角半角・空白・大文字小文字をそろえる）
 export function normName(s: string): string {
   return (s ?? '').normalize('NFKC').replace(/\s+/g, '').toLowerCase()
+}
+
+// 材料名の末尾の（　）が「下ごしらえ」なら、名前から外して下ごしらえの欄へ移す
+//   例：「ハム（千切り）」→ 名前「ハム」・下ごしらえ「千切り」。「有塩」「白」など、材料の種類を表すものは名前に残す
+const KEEP_IN_NAME =
+  /^(有塩|無塩|無調整|国産|白|赤|黒|青|黄|生|乾燥|粉|粉末|顆粒|液体|チューブ|缶|缶詰|瓶|絹|木綿|薄口|濃口|合わせ|赤だし|白だし)$/
+
+export function splitPrep(name: string, prep: string | null | undefined): { name: string; preparation: string } {
+  let base = (name ?? '').trim()
+  const preps: string[] = []
+  for (let i = 0; i < 3; i++) {
+    const m = base.match(/^(.+?)\s*[（(]([^）)]*)[）)]\s*$/)
+    if (!m) break
+    const inner = m[2].trim()
+    if (inner === '') {
+      base = m[1].trim()
+      continue
+    }
+    if (KEEP_IN_NAME.test(inner.normalize('NFKC'))) break
+    preps.unshift(inner)
+    base = m[1].trim()
+  }
+  const own = (prep ?? '').trim()
+  const all = [...preps, ...(own && !preps.includes(own) ? [own] : [])]
+  return { name: base, preparation: all.join('・') }
+}
+
+// 名前が材料マスタと同じ（全角半角・空白の違いは無視）で、まだ結び付いていない材料を、自動で結び付ける
+export function relinkByName(d: Draft, masters: MasterOption[]): Draft {
+  if (masters.length === 0) return d
+  const byName = new Map(masters.map((m) => [normName(m.name), m]))
+  return {
+    ...d,
+    ingredients: d.ingredients.map((i) => {
+      if (i.masterId) return i
+      const hit = byName.get(normName(i.name))
+      return hit ? { ...i, masterId: hit.id, name: hit.name } : i
+    }),
+  }
 }
 
 // 分量の表記（大さじ・小さじは単位を先頭に：大さじ2／それ以外は数量を先頭に：300g）
@@ -191,16 +233,19 @@ function toDraft(r: ServerRecipe): Draft {
       description: s.description ?? '',
       tip: s.tip ?? '',
     })),
-    ingredients: (r.ingredients ?? []).map((i) => ({
-      key: newKey(),
-      name: i.ingredient_name ?? '',
-      masterId: i.ingredient_master_id ?? null,
-      quantity: i.quantity ?? '',
-      unit: normUnit(i.unit ?? ''),
-      preparation: i.preparation ?? '',
-      stepNo: i.step_number != null ? (noMap.get(i.step_number) ?? null) : null,
-      group: i.group_label ?? '',
-    })),
+    ingredients: (r.ingredients ?? []).map((i) => {
+      const sp = splitPrep(i.ingredient_name ?? '', i.preparation)
+      return {
+        key: newKey(),
+        name: sp.name,
+        masterId: i.ingredient_master_id ?? null,
+        quantity: i.quantity ?? '',
+        unit: normUnit(i.unit ?? ''),
+        preparation: sp.preparation,
+        stepNo: i.step_number != null ? (noMap.get(i.step_number) ?? null) : null,
+        group: i.group_label ?? '',
+      }
+    }),
   }
 }
 

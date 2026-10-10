@@ -32,6 +32,7 @@ import {
   compressForAi,
   fetchMasterOptions,
   newKey,
+  relinkByName,
   saveDraft,
   validateDraft,
 } from '../lib/recipeImport'
@@ -190,14 +191,16 @@ export default function RecipeImportPage() {
     }
     setAnalyzing(false)
 
-    setDraft(r.draft)
+    // 名前が材料マスタと同じ材料は、自動で結び付ける（古い関数の結果でも、ハム（千切り）→ ハム にそろう）
+    const readDraft = relinkByName(r.draft, ms)
+    setDraft(readDraft)
     setWarnings(r.warnings)
     setSaveError(null)
     setRegError(null)
     window.scrollTo(0, 0)
 
     // 材料マスタに無い材料（や単位）があれば、先に材料の登録画面を出す
-    const p = msFailed ? { items: [], unitAdds: [] } : buildPlan(r.draft, ms)
+    const p = msFailed ? { items: [], unitAdds: [] } : buildPlan(readDraft, ms)
     if (planIsEmpty(p)) {
       setPlan(null)
       setStage('preview')
