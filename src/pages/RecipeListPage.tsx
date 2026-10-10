@@ -1,5 +1,5 @@
-
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：検索ボックスの右に、レシピ取り込み（テキスト・写真）へ進む「＋」ボタンを追加（それ以外は前と同じ）
 // 今回の変更：リスト表示のスワイプを「右スワイプ」で献立候補に追加／献立から外す に変更（これまでは左スワイプ）
 // 前提：recipe_nutrition ビュー（01）と、recipes.plan_confirmed 列（09）を作成済みであること
 // 機能：
@@ -409,6 +409,15 @@ export default function RecipeListPage() {
               📋
             </button>
           </div>
+          {/* レシピの取り込み（テキスト・写真）へ */}
+          <Link
+            to="/recipes/new"
+            aria-label="レシピを取り込む"
+            title="レシピを取り込む"
+            className="shrink-0 rounded-full bg-orange-500 px-3.5 py-1.5 text-base font-bold leading-none text-white active:opacity-80"
+          >
+            ＋
+          </Link>
         </div>
 
         {/* 1行目：ジャンル（すべて・和食・洋食・中華・エスニック・その他） */}
