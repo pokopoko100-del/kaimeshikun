@@ -1,63 +1,31 @@
 @echo off
-rem ============================================================
-rem  Collect src files + key root config files into one text file
-rem  How to use:
-rem   1) Put this file in the kaimeshikun folder (project root)
-rem   2) Double-click to run
-rem   3) "src_all.txt" will be created in the same folder
-rem      -> Attach that file to Copilot
-rem ============================================================
-
 setlocal enabledelayedexpansion
-
-set "ROOT=%~dp0src"
-set "BASE=%~dp0"
-set "OUT=%~dp0src_all.txt"
-
+cd /d "%~dp0"
+set "OUT=src_all.txt"
 if exist "%OUT%" del "%OUT%"
 
-echo Collecting root config files ...
-for %%G in (vite.config.ts index.html package.json tsconfig.json tsconfig.app.json) do (
-    if exist "%BASE%%%G" (
-        echo   - %%G
-        >>"%OUT%" echo ===== %%G =====
-        >>"%OUT%" echo.
-        type "%BASE%%%G" >> "%OUT%"
-        >>"%OUT%" echo.
-        >>"%OUT%" echo.
+rem ---- root files ----
+for %%F in (vite.config.ts index.html package.json tsconfig.json tsconfig.app.json tsconfig.node.json) do (
+  if exist "%%F" call :add "%%F"
+)
+
+rem ---- src and supabase\functions (only .ts .tsx .css, so .env is never included) ----
+for %%D in (src supabase\functions) do (
+  if exist "%%D" (
+    for /f "delims=" %%F in ('dir /s /b /a-d "%%D\*.ts" "%%D\*.tsx" "%%D\*.css"') do (
+      set "P=%%F"
+      set "P=!P:%CD%\=!"
+      call :add "!P!"
     )
+  )
 )
 
-if not exist "%ROOT%" (
-    echo [ERROR] "src" folder was not found.
-    echo Please put this bat file in the kaimeshikun folder, same level as "src".
-    echo.
-    pause
-    exit /b 1
-)
+echo Done: %OUT%
+endlocal
+exit /b
 
-echo Collecting files under src ...
-echo.
-
-for /r "%ROOT%" %%F in (*.ts *.tsx *.js *.jsx *.css *.json) do (
-    set "FULL=%%F"
-    set "REL=!FULL:%ROOT%=!"
-    echo   - !REL!
-    >>"%OUT%" echo ===== src!REL! =====
-    >>"%OUT%" echo.
-    type "%%F" >> "%OUT%"
-    >>"%OUT%" echo.
-    >>"%OUT%" echo.
-)
-
-echo.
-if exist "%OUT%" (
-    echo Done! "%OUT%" has been created.
-    echo Please attach this file to Copilot.
-) else (
-    echo [ERROR] Failed to create the output file.
-)
-
-echo.
-echo Press any key to close this window.
-pause >nul
+:add
+echo ===== %~1 =====>> "%OUT%"
+type "%~1">> "%OUT%"
+echo.>> "%OUT%"
+exit /b

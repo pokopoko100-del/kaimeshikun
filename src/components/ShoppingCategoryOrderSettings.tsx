@@ -1,5 +1,6 @@
-// src/components/ShoppingCategoryOrderSettings.tsx（新規作成）
-// 設定画面の「買い物リストのカテゴリ順」（▲▼で入れ替え。変更するとすぐ保存される）
+// src/components/ShoppingCategoryOrderSettings.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 設定画面の「買い物リストのカテゴリ順」の中身（▲▼で入れ替え。変更するとすぐ保存される）
+// 今回の変更：外側のカードと見出しを外した（開閉は SettingsSection がやるため）。中身の動きは前と同じ。
 import { useEffect, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
@@ -57,10 +58,9 @@ export default function ShoppingCategoryOrderSettings() {
   }
 
   return (
-    <section className="mb-6 rounded-xl bg-white p-4 shadow-sm">
-      <h2 className="text-sm font-bold text-gray-900">🛒 買い物リストのカテゴリ順</h2>
-      <p className="mt-1 text-[11px] leading-relaxed text-gray-400">
-        新しく追加する材料は、この順に並びます。すでにあるリストを並べ直すときは、買い物リストの「並べ替え」→「自動配置」を使ってください。
+    <div>
+      <p className="text-[11px] leading-relaxed text-gray-400">
+        新しく追加する材料は、この順に並びます。すでにあるリストを並べ直すときは、買い物リストの「自動配置」を使ってください。
       </p>
 
       {loading ? (
@@ -110,6 +110,6 @@ export default function ShoppingCategoryOrderSettings() {
           初期の順に戻す
         </button>
       </div>
-    </section>
+    </div>
   )
 }

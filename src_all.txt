@@ -1,5 +1,4 @@
 ===== vite.config.ts =====
-
 // vite.config.ts（ファイル全体。これで丸ごと置き換えてください）
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
@@ -51,9 +50,7 @@ export default defineConfig({
   ],
 })
 
-
 ===== index.html =====
-
 <!-- index.html（ファイル全体。これで丸ごと置き換えてください） -->
 <!doctype html>
 <html lang="ja">
@@ -76,9 +73,7 @@ export default defineConfig({
   </body>
 </html>
 
-
 ===== package.json =====
-
 {
   "name": "kaimeshikun",
   "private": true,
@@ -115,9 +110,7 @@ export default defineConfig({
   }
 }
 
-
 ===== tsconfig.json =====
-
 {
   "files": [],
   "references": [
@@ -126,9 +119,7 @@ export default defineConfig({
   ]
 }
 
-
 ===== tsconfig.app.json =====
-
 {
   "compilerOptions": {
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
@@ -156,9 +147,32 @@ export default defineConfig({
   "include": ["src"]
 }
 
+===== tsconfig.node.json =====
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "module": "nodenext",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["vite.config.ts"]
+}
 
 ===== src\supabaseClient.ts =====
-
 import { createClient } from '@supabase/supabase-js'
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -169,9 +183,7 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
         experimental: { passkey: true },
       },
     })
-
 ===== src\App.tsx =====
-
 // src/App.tsx（全体を置き換え）※前回版から修正：Layoutにsessionを渡すようにした
 import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
@@ -222,9 +234,7 @@ export default function App() {
   )
 }
 
-
 ===== src\main.tsx =====
-
 // src/main.tsx（ファイル全体。これで丸ごと置き換えてください）
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -240,9 +250,7 @@ createRoot(document.getElementById('root')!).render(
   </StrictMode>,
 )
 
-
 ===== src\index.css =====
-
 /* src/index.css（ファイル全体。これで丸ごと置き換えてください） */
 @import "tailwindcss";
 
@@ -261,9 +269,371 @@ html {
   }
 }
 
+===== src\components\IngredientUnitsEditor.tsx =====
+// src/components/IngredientUnitsEditor.tsx（新規作成）
+// 材料マスタの「単位」の追加・編集・削除フォーム（テーブル: ingredient_units）。
+//   ・1つの材料に、単位をいくつでも登録できる（大さじ・小さじ・個・枚・g・ml…）。「1単位が何gか」を入れる
+//   ・「基準」は1材料に1つだけ。買い物リストの表示や、旧列（default_unit / unit_weight_g）の値に使われる
+//   ・基準を変えたとき・基準の重さを直したときは、材料マスタの旧列（default_unit / unit_weight_g）も同じ値にそろえる
+//   ・大さじ・小さじ・ml・cc は「大さじ＝15ml」の関係で、まとめて追加／まとめて直せる
+//   ・基準の単位は削除できない（先に別の単位を基準にする）。レシピで使っている単位を消すときは確認を出す
+import { useState } from 'react'
+import { supabase } from '../supabaseClient'
+import type { IngredientMaster } from '../types/ingredient'
+import { normUnit } from '../lib/shoppingAggregate'
+import { errorText } from '../lib/errorText'
+
+export type UnitRow = {
+  id: string
+  ingredient_master_id: string
+  unit: string
+  weight_g: number
+  is_default: boolean
+  sort_order: number
+}
+
+const SUGGESTIONS = ['大さじ', '小さじ', '個', '枚', '本', '片', 'かけ', '玉', '束', '袋', 'パック', '缶', '丁', '切れ', '尾', 'つまみ', 'ml', 'cc', 'g']
+const VOLUME_UNITS = ['大さじ', '小さじ', 'ml', 'cc']
+
+// 容量の単位は「大さじ＝15ml・小さじ＝5ml・1ml＝1cc」。1mlあたりの重さ（g）に直す
+function gramsPerMl(unit: string, weightG: number): number | null {
+  if (unit === '大さじ') return weightG / 15
+  if (unit === '小さじ') return weightG / 5
+  if (unit === 'ml' || unit === 'cc') return weightG
+  return null
+}
+
+// 1mlあたりの重さから、容量の単位それぞれの「1単位の重さ」を出す
+function volumeWeight(unit: string, perMl: number): number {
+  const v = unit === '大さじ' ? perMl * 15 : unit === '小さじ' ? perMl * 5 : perMl
+  return Math.round(v * 1000) / 1000
+}
+
+function sortRows(rows: UnitRow[]): UnitRow[] {
+  return [...rows].sort(
+    (a, b) =>
+      Number(b.is_default) - Number(a.is_default) || a.sort_order - b.sort_order || a.unit.localeCompare(b.unit, 'ja'),
+  )
+}
+
+export default function IngredientUnitsEditor({
+  item,
+  units,
+  onUnitsChange,
+  onDefaultChange,
+}: {
+  item: IngredientMaster
+  units: UnitRow[] | undefined // undefined＝読み込みに失敗
+  onUnitsChange: (masterId: string, units: UnitRow[]) => void
+  onDefaultChange: (masterId: string, unit: string | null, weightG: number | null) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [drafts, setDrafts] = useState<Record<string, string>>({}) // 重さの入力途中の値（unit.id → 文字）
+  const [newUnit, setNewUnit] = useState('')
+  const [newWeight, setNewWeight] = useState('')
+  const [withVolume, setWithVolume] = useState(true) // 大さじ・小さじを足すとき、ml・cc などもまとめて足す
+  const [message, setMessage] = useState<string | null>(null)
+
+  if (units === undefined) {
+    return (
+      <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+        単位の一覧を読み込めませんでした（ingredient_units テーブルを作成済みか確認してください）。
+      </p>
+    )
+  }
+
+  const rows = sortRows(units)
+
+  // DBから取り直して画面に反映。基準単位が変わっていれば、材料マスタの旧列もそろえる
+  const reload = async (syncLegacy: boolean) => {
+    const { data, error } = await supabase
+      .from('ingredient_units')
+      .select('id, ingredient_master_id, unit, weight_g, is_default, sort_order')
+      .eq('ingredient_master_id', item.id)
+    if (error) throw error
+    const list = ((data ?? []) as UnitRow[]).map((r) => ({ ...r, weight_g: Number(r.weight_g) }))
+    onUnitsChange(item.id, list)
+    setDrafts({})
+
+    if (syncLegacy) {
+      const def = list.find((r) => r.is_default)
+      if (def) {
+        const w = def.unit === 'g' ? 1 : def.weight_g
+        if (item.default_unit !== def.unit || item.unit_weight_g !== w) {
+          const { data: upd, error: updErr } = await supabase
+            .from('ingredient_master')
+            .update({ default_unit: def.unit, unit_weight_g: w })
+            .eq('id', item.id)
+            .select('id')
+          if (updErr || !upd || upd.length === 0) throw updErr ?? new Error('材料マスタを更新できませんでした')
+          onDefaultChange(item.id, def.unit, w)
+        }
+      }
+    }
+  }
+
+  // 共通の実行ラッパ（二重タップ防止・エラー表示・失敗時は取り直して画面をDBに合わせる）
+  const run = async (job: () => Promise<void>, syncLegacy = false) => {
+    if (busy) return
+    setBusy(true)
+    setMessage(null)
+    try {
+      await job()
+      await reload(syncLegacy)
+    } catch (e) {
+      console.error(e)
+      setMessage('失敗しました：' + errorText(e))
+      try {
+        await reload(false)
+      } catch {
+        /* 取り直せなくても、上のメッセージを優先 */
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // ---------- 追加 ----------
+  const handleAdd = () =>
+    run(async () => {
+      const unit = normUnit(newUnit)
+      if (!unit) throw new Error('単位を入力してください（例：個、枚、大さじ）')
+      const w = unit === 'g' ? 1 : Number(newWeight)
+      if (!Number.isFinite(w) || w <= 0) throw new Error('「1単位が何gか」を、0より大きい数字で入力してください')
+      if (rows.some((r) => r.unit === unit)) throw new Error(`「${unit}」はすでに登録されています（重さを変えるなら下の一覧で直してください）`)
+
+      let order = rows.reduce((m, r) => Math.max(m, r.sort_order), 0)
+      const inserts: { unit: string; weight_g: number }[] = [{ unit, weight_g: w }]
+
+      // 大さじ・小さじ・ml・cc は、まだ無いものをまとめて足す
+      const perMl = gramsPerMl(unit, w)
+      if (withVolume && perMl != null) {
+        for (const u of VOLUME_UNITS) {
+          if (u !== unit && !rows.some((r) => r.unit === u)) inserts.push({ unit: u, weight_g: volumeWeight(u, perMl) })
+        }
+      }
+
+      const isFirst = rows.length === 0 // 1つ目は自動で基準にする
+      const payload = inserts.map((x, i) => ({
+        ingredient_master_id: item.id,
+        unit: x.unit,
+        weight_g: x.weight_g,
+        is_default: isFirst && i === 0,
+        sort_order: ++order,
+      }))
+      const { data, error } = await supabase.from('ingredient_units').insert(payload).select('id')
+      if (error) throw error
+      if (!data || data.length === 0) throw new Error('追加できませんでした（権限を確認してください）')
+      setNewUnit('')
+      setNewWeight('')
+    }, true)
+
+  // ---------- 重さを直す ----------
+  const handleSaveWeight = (row: UnitRow) =>
+    run(async () => {
+      const w = Number(drafts[row.id])
+      if (!Number.isFinite(w) || w <= 0) throw new Error('重さは、0より大きい数字で入力してください')
+      const { data, error } = await supabase
+        .from('ingredient_units')
+        .update({ weight_g: w })
+        .eq('id', row.id)
+        .select('id')
+      if (error) throw error
+      if (!data || data.length === 0) throw new Error('更新できませんでした（権限を確認してください）')
+
+      // 大さじ・小さじ・ml・cc は、ほかの容量単位も同じ比率に直すか確認する
+      const perMl = gramsPerMl(row.unit, w)
+      if (perMl != null) {
+        const others = rows.filter(
+          (r) =>
+            r.id !== row.id &&
+            VOLUME_UNITS.includes(r.unit) &&
+            Math.abs(r.weight_g - volumeWeight(r.unit, perMl)) > 0.005,
+        )
+        if (others.length > 0) {
+          const names = others.map((r) => r.unit).join('・')
+          if (window.confirm(`${names} も、「${row.unit}」に合わせて直しますか？（大さじ＝15ml で換算）`)) {
+            for (const r of others) {
+              const { error: e2 } = await supabase
+                .from('ingredient_units')
+                .update({ weight_g: volumeWeight(r.unit, perMl) })
+                .eq('id', r.id)
+              if (e2) throw e2
+            }
+          }
+        }
+      }
+    }, true)
+
+  // ---------- 基準にする ----------
+  const handleSetDefault = (row: UnitRow) =>
+    run(async () => {
+      if (row.is_default) return
+      // 基準は1材料に1つだけ（DB側の制約）なので、先に今の基準を外してから付ける
+      const current = rows.find((r) => r.is_default)
+      if (current) {
+        const { error: e1 } = await supabase.from('ingredient_units').update({ is_default: false }).eq('id', current.id)
+        if (e1) throw e1
+      }
+      const { data, error } = await supabase
+        .from('ingredient_units')
+        .update({ is_default: true })
+        .eq('id', row.id)
+        .select('id')
+      if (error) throw error
+      if (!data || data.length === 0) throw new Error('更新できませんでした（権限を確認してください）')
+    }, true)
+
+  // ---------- 削除 ----------
+  const handleDelete = (row: UnitRow) =>
+    run(async () => {
+      if (row.is_default) throw new Error('基準の単位は削除できません。先に別の単位を「基準」にしてください')
+
+      // レシピの材料でこの単位を使っているか確認（消すと、その材料が「未計算」になる）
+      const { count, error: cErr } = await supabase
+        .from('ingredients')
+        .select('id', { count: 'exact', head: true })
+        .eq('ingredient_master_id', item.id)
+        .eq('unit', row.unit)
+      if (cErr) throw cErr
+      const used = count ?? 0
+      const text =
+        used > 0
+          ? `「${row.unit}」は、レシピの材料 ${used} 件で使われています。消すとその材料が「未計算」になります。それでも消しますか？`
+          : `「${row.unit}」を削除しますか？`
+      if (!window.confirm(text)) return
+
+      const { data, error } = await supabase.from('ingredient_units').delete().eq('id', row.id).select('id')
+      if (error) throw error
+      if (!data || data.length === 0) throw new Error('削除できませんでした（権限を確認してください）')
+    })
+
+  const volumeHint = ['大さじ', '小さじ', 'ml', 'cc'].includes(normUnit(newUnit) ?? '')
+
+  return (
+    <div className="rounded-lg bg-gray-50 p-2 text-xs text-gray-600">
+      <div className="mb-1.5 flex items-baseline justify-between gap-2">
+        <span className="font-semibold text-gray-500">単位（1単位が何gか）</span>
+        <span className="text-[10px] text-gray-400">●＝基準</span>
+      </div>
+
+      {rows.length === 0 ? (
+        <p className="mb-2 text-[11px] text-gray-400">単位はまだ登録されていません。下から追加してください（1つ目が基準になります）。</p>
+      ) : (
+        <ul className="mb-2 space-y-1.5">
+          {rows.map((r) => {
+            const isG = r.unit === 'g'
+            const draft = drafts[r.id]
+            const changed = !isG && draft !== undefined && Number(draft) !== r.weight_g
+            return (
+              <li key={r.id} className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => handleSetDefault(r)}
+                  aria-label={r.is_default ? `${r.unit}は基準の単位` : `${r.unit}を基準にする`}
+                  className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-[11px] ${
+                    r.is_default ? 'border-amber-500 bg-amber-500 text-white' : 'border-gray-300 bg-white text-gray-300'
+                  } disabled:opacity-50`}
+                >
+                  ●
+                </button>
+                <span className="w-14 shrink-0 truncate font-medium text-gray-800">{r.unit}</span>
+                {isG ? (
+                  <span className="flex-1 text-gray-400">＝ 1 g（固定）</span>
+                ) : (
+                  <>
+                    <span className="text-gray-400">＝</span>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={draft ?? String(r.weight_g)}
+                      onChange={(e) => setDrafts((d) => ({ ...d, [r.id]: e.target.value }))}
+                      disabled={busy}
+                      className="w-16 rounded border border-gray-300 bg-white px-1.5 py-1 text-right text-gray-800 focus:border-amber-500 focus:outline-none"
+                    />
+                    <span className="text-gray-400">g</span>
+                    <div className="flex-1" />
+                    {changed && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => handleSaveWeight(r)}
+                        className="rounded-full bg-amber-500 px-2.5 py-1 font-semibold text-white disabled:opacity-50"
+                      >
+                        保存
+                      </button>
+                    )}
+                  </>
+                )}
+                <button
+                  type="button"
+                  disabled={busy || r.is_default}
+                  onClick={() => handleDelete(r)}
+                  aria-label={`${r.unit}を削除`}
+                  className="shrink-0 rounded-full border border-red-200 px-2 py-1 text-red-400 disabled:opacity-30"
+                >
+                  削除
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+
+      {/* 追加フォーム */}
+      <div className="flex items-center gap-1.5 border-t border-gray-200 pt-2">
+        <input
+          type="text"
+          list={`unit-suggest-${item.id}`}
+          value={newUnit}
+          onChange={(e) => setNewUnit(e.target.value)}
+          placeholder="単位（例：枚）"
+          disabled={busy}
+          className="w-24 rounded border border-gray-300 bg-white px-1.5 py-1 text-gray-800 focus:border-amber-500 focus:outline-none"
+        />
+        <datalist id={`unit-suggest-${item.id}`}>
+          {SUGGESTIONS.map((s) => (
+            <option key={s} value={s} />
+          ))}
+        </datalist>
+        <span className="text-gray-400">＝</span>
+        <input
+          type="text"
+          inputMode="decimal"
+          value={newUnit.trim() === 'g' ? '1' : newWeight}
+          onChange={(e) => setNewWeight(e.target.value)}
+          placeholder="重さ"
+          disabled={busy || newUnit.trim() === 'g'}
+          className="w-16 rounded border border-gray-300 bg-white px-1.5 py-1 text-right text-gray-800 focus:border-amber-500 focus:outline-none"
+        />
+        <span className="text-gray-400">g</span>
+        <div className="flex-1" />
+        <button
+          type="button"
+          disabled={busy || newUnit.trim() === ''}
+          onClick={handleAdd}
+          className="rounded-full bg-amber-500 px-3 py-1 font-semibold text-white disabled:opacity-40"
+        >
+          {busy ? '処理中…' : '追加'}
+        </button>
+      </div>
+      {volumeHint && (
+        <label className="mt-1.5 flex items-center gap-1.5 text-[11px] text-gray-500">
+          <input type="checkbox" checked={withVolume} onChange={(e) => setWithVolume(e.target.checked)} />
+          大さじ・小さじ・ml・cc もまとめて追加（大さじ＝15ml で換算）
+        </label>
+      )}
+
+      {message && <p className="mt-2 rounded bg-red-50 px-2 py-1.5 text-[11px] text-red-600">{message}</p>}
+      <p className="mt-2 text-[10px] leading-relaxed text-gray-400">
+        レシピや買い物リストの単位は、ここに登録した単位と同じ名前のときだけ、gに換算されます。
+      </p>
+    </div>
+  )
+}
 
 ===== src\components\Layout.tsx =====
-.
 // src/components/Layout.tsx（全体を置き換え）※タブ順を「レシピ・材料・献立・買い物・設定」に変更
 import { NavLink, Outlet } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
@@ -308,10 +678,8 @@ export default function Layout({ session }: { session: Session }) {
     </div>
   )
 }
-.
-.
+
 ===== src\components\LoginPage.tsx =====
-.
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
 
@@ -424,10 +792,8 @@ export default function LoginPage() {
       </div>
     </div>
   )
-}echo ..
-..
+}
 ===== src\components\ServingsStepper.tsx =====
-
 // src/components/ServingsStepper.tsx（新規作成）
 // 「－ 2人前 ＋」の人数切替ボタン
 import { MAX_SERVINGS, MIN_SERVINGS } from '../lib/useServings'
@@ -463,11 +829,11 @@ export default function ServingsStepper({
     </div>
   )
 }
-echo ..
-..
+
 ===== src\components\ShoppingAddSheet.tsx =====
 
-// src/components/ShoppingAddSheet.tsx（新規作成）
+// src/components/ShoppingAddSheet.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：材料マスタの単位表（ingredient_units）も読み込み、単位違いの材料を基準単位にそろえて合算する
 // 「買い物リストに追加」の確認画面（全画面）
 //   確定した献立の材料を合計して一覧表示 → 選択／削除／数量変更 → 「確定して買い物リストへ追加」
 //   ・人数は、献立画面の人数設定（○人前）で分量を計算
@@ -475,7 +841,7 @@ echo ..
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../supabaseClient'
 import { aggregateIngredients, itemKeyOf } from '../lib/shoppingAggregate'
-import type { AggItem, RawIngredient, RecipeInfo } from '../lib/shoppingAggregate'
+import type { AggItem, MasterUnit, RawIngredient, RecipeInfo } from '../lib/shoppingAggregate'
 import { addItemsToShoppingList } from '../lib/shoppingList'
 import { fetchCategoryOrder, findShoppingListId, getHouseholdId } from '../lib/household'
 import { CATEGORY_BADGE, normalizeCategoryOrder } from '../lib/categoryOrder'
@@ -514,7 +880,7 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
           supabase
             .from('ingredients')
             .select(
-              'recipe_id, ingredient_master_id, ingredient_name, quantity, unit, ingredient_master(ingredient_name, category, default_unit, unit_weight_g)',
+              'recipe_id, ingredient_master_id, ingredient_name, quantity, unit, ingredient_master(ingredient_name, category, default_unit, unit_weight_g, ingredient_units(unit, weight_g, is_default))',
             )
             .in('recipe_id', ids)
             .order('sort_order'),
@@ -538,11 +904,18 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
           })
         }
 
-        // 結合したマスタ情報は、配列で返る場合もあるのでそろえる
+        // 結合したマスタ情報は、配列で返る場合もあるのでそろえる（単位表は ingredient_units で返る）
+        type JoinedMaster = {
+          ingredient_name: string
+          category: string
+          default_unit: string | null
+          unit_weight_g: number | null
+          ingredient_units: MasterUnit[] | null
+        }
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const raws: RawIngredient[] = (ingRes.data ?? []).map((row: any) => {
           const m = (Array.isArray(row.ingredient_master) ? row.ingredient_master[0] : row.ingredient_master) as
-            | RawIngredient['master']
+            | JoinedMaster
             | null
             | undefined
           return {
@@ -551,7 +924,15 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
             ingredient_name: row.ingredient_name as string,
             quantity: row.quantity as string | null,
             unit: row.unit as string | null,
-            master: m ?? null,
+            master: m
+              ? {
+                  ingredient_name: m.ingredient_name,
+                  category: m.category,
+                  default_unit: m.default_unit,
+                  unit_weight_g: m.unit_weight_g,
+                  units: m.ingredient_units ?? [],
+                }
+              : null,
           }
         })
 
@@ -773,10 +1154,8 @@ export default function ShoppingAddSheet({ recipes, servings, userId, onClose, o
     </div>
   )
 }
-echo ..
-..
-===== src\components\ShoppingCategoryOrderSettings.tsx =====
 
+===== src\components\ShoppingCategoryOrderSettings.tsx =====
 // src/components/ShoppingCategoryOrderSettings.tsx（新規作成）
 // 設定画面の「買い物リストのカテゴリ順」（▲▼で入れ替え。変更するとすぐ保存される）
 import { useEffect, useState } from 'react'
@@ -892,10 +1271,8 @@ export default function ShoppingCategoryOrderSettings() {
     </section>
   )
 }
-echo ..
-..
-===== src\components\SwipeRow.tsx =====
 
+===== src\components\SwipeRow.tsx =====
 // src/components/SwipeRow.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 左右にスワイプできる行。離したときに一定以上動いていたら、その向きの操作を実行する。
 //   左スワイプ（指を右→左）… onSwipeLeft  を実行（右側にラベルが現れる）
@@ -1050,10 +1427,8 @@ export default function SwipeRow({
     </div>
   )
 }
-echo ..
-..
-===== src\data\nutrientInfo.ts =====
 
+===== src\data\nutrientInfo.ts =====
 
 import type { IngredientMaster } from '../types/ingredient';
 
@@ -1268,10 +1643,8 @@ export function getNutrientInfo(key: keyof IngredientMaster) {
   return NUTRIENT_INFO_LIST.find((n) => n.key === key) ?? null;
 }
 
-echo ..
-..
-===== src\lib\categoryOrder.ts =====
 
+===== src\lib\categoryOrder.ts =====
 // src/lib/categoryOrder.ts（新規作成）
 // 買い物リストのカテゴリ順（設定画面で変更できる）に関する共通部品
 
@@ -1322,10 +1695,8 @@ export const CATEGORY_BADGE: Record<string, string> = {
   その他: 'bg-gray-100 text-gray-700',
   日用品: 'bg-purple-100 text-purple-700',
 }
-echo ..
-..
-===== src\lib\dates.ts =====
 
+===== src\lib\dates.ts =====
 // src/lib/dates.ts（新規作成）
 // 日付まわりの共通部品（「作った日」の保存と表示に使う）
 
@@ -1346,10 +1717,8 @@ export function formatCookedDate(ymd: string): string {
   const w = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()]
   return `${m[1]}/${m[2]}/${m[3]}（${w}）`
 }
-echo ..
-..
-===== src\lib\dragReorder.ts =====
 
+===== src\lib\dragReorder.ts =====
 // src/lib/dragReorder.ts（新規作成）
 // 買い物リストの「長押しドラッグで並べ替え」の計算だけを切り出した部品（画面に依存しない）
 
@@ -1399,10 +1768,8 @@ export function planSortOrder(list: { id: string; sort_order: number }[], id: st
   ordered.splice(toIndex, 0, moved)
   return { kind: 'renumber', orders: ordered.map((it, i) => ({ id: it.id, sort_order: (i + 1) * 1000 })) }
 }
-echo ..
-..
-===== src\lib\errorText.ts =====
 
+===== src\lib\errorText.ts =====
 // src/lib/errorText.ts（新規作成）
 // どんな形のエラーでも、画面に出せる文字列にする
 export function errorText(e: unknown): string {
@@ -1412,10 +1779,8 @@ export function errorText(e: unknown): string {
   }
   return '不明なエラー'
 }
-echo ..
-..
-===== src\lib\household.ts =====
 
+===== src\lib\household.ts =====
 // src/lib/household.ts（新規作成）
 // 世帯（家族グループ）まわりのDB操作：世帯ID・買い物リストのID・カテゴリ順の読み書き
 import { supabase } from '../supabaseClient'
@@ -1486,17 +1851,27 @@ export async function getOrCreateShoppingListId(householdId: string, userId: str
   if (error) throw error
   return data.id as string
 }
-echo ..
-..
+
 ===== src\lib\shoppingAggregate.ts =====
 
-// src/lib/shoppingAggregate.ts（新規作成）
+// src/lib/shoppingAggregate.ts（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：材料の「複数単位」対応（ingredient_units）
+//   ・材料マスタに登録された単位（大さじ・小さじ・個・枚・g…）なら、どの単位どうしでも換算して合算できる
+//   ・合算した結果は、その材料の「基準単位」（ingredient_units.is_default）で表示する
+//   ・単位が全部同じときは、これまでどおりそのまま合算（単位は変えない）
 // 確定した献立の材料を、買い物用に合計する（画面に依存しない計算だけの部品）
 //   ・同じ材料は合算（例：玉ねぎ 200g ＋ 100g → 300g）
 //   ・人数に合わせて分量を増減（レシピの元の人数 → 選んだ人数）
-//   ・単位が違うときは、材料マスタの「既定の単位」と「1単位の重さ」で換算して合算できる場合だけ合算
+//   ・単位が違うときは、材料マスタの単位表（ingredient_units）で換算して合算できる場合だけ合算
 //     （換算できなければ、単位ごとに別の行にする）
 //   ・「適量」「少々」などは、数量がある行があれば無視。なければ「適量」の1行にする
+
+// 材料マスタに登録された単位（テーブル: ingredient_units）。weight_g は「1単位が何gか」
+export type MasterUnit = {
+  unit: string
+  weight_g: number
+  is_default: boolean
+}
 
 export type RawIngredient = {
   recipe_id: string
@@ -1507,8 +1882,9 @@ export type RawIngredient = {
   master: {
     ingredient_name: string
     category: string
-    default_unit: string | null
-    unit_weight_g: number | null
+    default_unit: string | null // 移行期間のフォールバック（units が空のときだけ使う）
+    unit_weight_g: number | null // 同上
+    units: MasterUnit[] // 単位表。無ければ空の配列
   } | null
 }
 
@@ -1550,6 +1926,31 @@ export function normUnit(unit: string | null | undefined): string | null {
   if (u === '') return null
   if (u === 'ｇ' || u === 'グラム') return 'g'
   return u
+}
+
+// 単位 → 「1単位が何gか」の表を作る（g はいつでも 1）
+//   units が空でも、旧列（default_unit / unit_weight_g）があればそれを使う（移行期間の保険）
+export function buildUnitWeights(
+  units: MasterUnit[] | null | undefined,
+  defaultUnit?: string | null,
+  unitWeightG?: number | null,
+): Map<string, number> {
+  const weights = new Map<string, number>()
+  weights.set('g', 1)
+  for (const u of units ?? []) {
+    const name = normUnit(u.unit)
+    const w = Number(u.weight_g)
+    if (name != null && name !== 'g' && w > 0) weights.set(name, w)
+  }
+  const du = normUnit(defaultUnit)
+  if (du != null && !weights.has(du) && unitWeightG != null && unitWeightG > 0) weights.set(du, unitWeightG)
+  return weights
+}
+
+// 基準単位（買い物リストなどに表示する単位）
+export function pickDefaultUnit(units: MasterUnit[] | null | undefined, defaultUnit?: string | null): string | null {
+  const d = (units ?? []).find((u) => u.is_default)
+  return normUnit(d?.unit ?? defaultUnit)
 }
 
 // 見やすい桁数に丸めて、文字列にする（0.75 / 12.5 / 300）
@@ -1613,18 +2014,14 @@ function buildItems(g: Group): AggItem[] {
       // 単位が全部同じ → そのまま合算
       push(roundQty(numeric.reduce((s, l) => s + (l.qty as number), 0)), units[0])
     } else {
-      // 単位がばらばら → マスタの既定の単位に換算できるなら合算
-      const du = normUnit(g.master?.default_unit)
-      const w = g.master?.unit_weight_g ?? null
-      const convertible =
-        du != null && numeric.every((l) => l.unit === 'g' || (l.unit === du && w != null && w > 0))
-      if (convertible && du != null) {
-        const grams = numeric.reduce(
-          (s, l) => s + (l.unit === 'g' ? (l.qty as number) : (l.qty as number) * (w as number)),
-          0,
-        )
-        const q = du === 'g' ? grams : grams / (w as number)
-        push(roundQty(q), du)
+      // 単位がばらばら → マスタの単位表で換算できるなら、基準単位に直して合算
+      const weights = buildUnitWeights(g.master?.units, g.master?.default_unit, g.master?.unit_weight_g)
+      const du = pickDefaultUnit(g.master?.units, g.master?.default_unit)
+      const dw = du != null ? weights.get(du) : undefined
+      const convertible = dw != null && numeric.every((l) => l.unit != null && weights.has(l.unit))
+      if (convertible && du != null && dw != null) {
+        const grams = numeric.reduce((sum, l) => sum + (l.qty as number) * (weights.get(l.unit as string) as number), 0)
+        push(roundQty(grams / dw), du)
       } else {
         // 換算できない → 単位ごとに別の行
         for (const u of units) {
@@ -1692,18 +2089,20 @@ export function aggregateIngredients(
   for (const g of groups.values()) out.push(...buildItems(g))
   return out
 }
-echo ..
-..
+
 ===== src\lib\shoppingList.ts =====
 
-// src/lib/shoppingList.ts（新規作成）
+// src/lib/shoppingList.ts（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：すでにリストにある材料と単位が違っても、材料マスタの単位表（ingredient_units）で換算できれば、既存の行に足す
+//   例：リストに「卵 2個」→ 追加「卵 100g」→ 「卵 4個」にまとめる
 // 買い物リストへ材料を追加する処理
 //   ・すでにリストにある（未購入の）同じ材料・同じ単位は、数量を足して1行にまとめる
 //   ・新しい材料は、カテゴリ順（設定画面の順）に合う位置に自動で差し込む
 import { supabase } from '../supabaseClient'
 import { fetchCategoryOrder, getHouseholdId, getOrCreateShoppingListId } from './household'
 import { computeSortOrders } from './shoppingOrder'
-import { itemKeyOf, normUnit, parseQty, roundQty } from './shoppingAggregate'
+import { buildUnitWeights, itemKeyOf, normUnit, parseQty, roundQty } from './shoppingAggregate'
+import type { MasterUnit } from './shoppingAggregate'
 
 export type NewShoppingItem = {
   masterId: string | null
@@ -1742,17 +2141,56 @@ export async function addItemsToShoppingList(params: {
   if (error) throw error
   const open = ((data ?? []) as ExistingRow[]).filter((e) => !e.is_checked) // 未購入だけが対象
 
+  // 追加する材料の単位表（材料ID → 単位 → 1単位のg）。読めなくても、従来どおり「同じ単位だけ」合算する
+  const weightsByMaster = new Map<string, Map<string, number>>()
+  const masterIds = Array.from(new Set(items.map((i) => i.masterId).filter((x): x is string => !!x)))
+  if (masterIds.length > 0) {
+    const { data: uData, error: uErr } = await supabase
+      .from('ingredient_units')
+      .select('ingredient_master_id, unit, weight_g, is_default')
+      .in('ingredient_master_id', masterIds)
+    if (uErr) {
+      console.error(uErr)
+    } else {
+      const grouped = new Map<string, MasterUnit[]>()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(uData ?? []).forEach((u: any) => {
+        const id = u.ingredient_master_id as string
+        grouped.set(id, [
+          ...(grouped.get(id) ?? []),
+          { unit: u.unit as string, weight_g: Number(u.weight_g), is_default: !!u.is_default },
+        ])
+      })
+      grouped.forEach((list, id) => weightsByMaster.set(id, buildUnitWeights(list)))
+    }
+  }
+
   // ① 既にある同じ材料（同じ単位）には数量を足す。それ以外は新しい行にする
   const toInsert: NewShoppingItem[] = []
   const updates = new Map<string, string>() // id → 新しい数量
   for (const it of items) {
     const key = itemKeyOf(it.masterId, it.name)
     const unit = normUnit(it.unit)
-    const match = open.find(
-      (e) => itemKeyOf(e.ingredient_master_id, e.item_name) === key && normUnit(e.unit) === unit,
-    )
+    const sameItem = open.filter((e) => itemKeyOf(e.ingredient_master_id, e.item_name) === key)
+    // ① 同じ単位の行があれば、そこへ足す
+    let match = sameItem.find((e) => normUnit(e.unit) === unit)
+    let b = parseQty(it.quantity)
+    // ② 無ければ、単位表で換算できる行へ、換算して足す（数量が数値の行だけ）
+    if (!match && it.masterId && unit != null) {
+      const w = weightsByMaster.get(it.masterId)
+      const from = w?.get(unit)
+      if (w && from != null) {
+        const target = sameItem.find((e) => {
+          const eu = normUnit(e.unit)
+          return eu != null && w.has(eu) && parseQty(e.quantity) != null
+        })
+        if (target && b != null) {
+          match = target
+          b = (b * from) / (w.get(normUnit(target.unit) as string) as number)
+        }
+      }
+    }
     const a = parseQty(match?.quantity)
-    const b = parseQty(it.quantity)
     if (match && a != null && b != null) {
       const sum = roundQty(a + b)
       match.quantity = sum // 同じ行に2回足すときのため、手元の値も更新
@@ -1798,10 +2236,8 @@ export async function addItemsToShoppingList(params: {
 
   return { inserted: toInsert.length, merged: updates.size }
 }
-echo ..
-..
-===== src\lib\shoppingOrder.ts =====
 
+===== src\lib\shoppingOrder.ts =====
 // src/lib/shoppingOrder.ts（新規作成）
 // 買い物リストに新しい材料を足すときの「自動配置」の計算（画面に依存しない部品）
 //   ・新しい材料は、カテゴリ順（設定画面の順）に合う位置に差し込む
@@ -1848,10 +2284,8 @@ export function computeSortOrders(
   }
   return result
 }
-echo ..
-..
-===== src\lib\supabaseStorage.ts =====
 
+===== src\lib\supabaseStorage.ts =====
 // ファイル: src/lib/supabaseStorage.ts
 // recipe-images バケット(非公開)から、期限付きの閲覧URLを取得する
 
@@ -1874,10 +2308,8 @@ export async function getRecipeImageUrl(imagePath: string | null): Promise<strin
   }
 
   return data.signedUrl
-}echo ..
-..
+}
 ===== src\lib\useRecipeImage.ts =====
-
 // ファイル: src/lib/useRecipeImage.ts
 // レシピ写真のURLを取得するReactフック(署名付きURLをstateで保持)
 
@@ -1905,10 +2337,8 @@ export function useRecipeImage(imagePath: string | null) {
   }, [imagePath])
 
   return url
-}echo ..
-..
+}
 ===== src\lib\useServings.ts =====
-
 // src/lib/useServings.ts（新規作成）
 // 「何人前で表示するか」を、レシピ一覧・レシピ詳細・献立で共通に使うためのフック。
 // 選んだ人数は端末に保存され、次回も同じ人数で開きます（最初は1人前）。
@@ -1934,12 +2364,15 @@ export function useServings(): [number, (n: number) => void] {
 
   return [servings, change]
 }
-echo ..
-..
+
 ===== src\pages\MasterPage.tsx =====
 
 // src/pages/MasterPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の修正：
+// 前提：ingredient_units テーブル（複数単位の対応）を作成済みであること
+// 今回の変更：
+//  ・材料を開いたとき、「単位」の追加・編集・削除フォームを表示（大さじ・小さじ・個・枚…を何個でも登録）
+//    基準の単位を変えたときは、材料マスタの default_unit / unit_weight_g も自動でそろえる（一覧の「1単位あたり」表示に反映）
+// これまでの修正：
 //  ① 一覧の左側を「分類＋旬」→「材料名」→「銘柄」の3段・左揃えに変更
 //  ② 「100gあたり」を上部に固定表示し、各レコードの「/ 100g」を削除
 //  ③ 右側の数値を「117kcal  40円」（大きめ）＋「（大さじ1：21kcal, 7.2円）」（小さめ）の2段表示に変更
@@ -1949,6 +2382,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../supabaseClient';
 import type { IngredientCategory, IngredientMaster } from '../types/ingredient';
 import { NUTRIENT_INFO_LIST, getNutrientInfo } from '../data/nutrientInfo';
+import IngredientUnitsEditor from '../components/IngredientUnitsEditor';
+import type { UnitRow } from '../components/IngredientUnitsEditor';
 
 const CATEGORIES: IngredientCategory[] = [
   '野菜',
@@ -2115,6 +2550,9 @@ export default function MasterPage() {
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
   const [lightbox, setLightbox] = useState<Lightbox | null>(null);
   const [uploadingId, setUploadingId] = useState<string | null>(null);
+  // 材料ごとの単位表（材料ID → 単位の一覧）。読み込みに失敗したときは undefined のまま
+  const [unitsByMaster, setUnitsByMaster] = useState<Record<string, UnitRow[]> | null>(null);
+  const [unitsFailed, setUnitsFailed] = useState(false);
 
   useEffect(() => {
     const fetchIngredients = async () => {
@@ -2136,6 +2574,23 @@ export default function MasterPage() {
       const list = (data ?? []) as IngredientMaster[];
       setItems(list);
       setLoading(false);
+
+      // 単位表：読めなくても材料の一覧は表示する（開いたときに案内を出す）
+      const { data: unitData, error: unitError } = await supabase
+        .from('ingredient_units')
+        .select('id, ingredient_master_id, unit, weight_g, is_default, sort_order')
+        .range(0, 4999);
+      if (unitError) {
+        console.error(unitError);
+        setUnitsFailed(true);
+      } else {
+        const grouped: Record<string, UnitRow[]> = {};
+        (unitData ?? []).forEach((u) => {
+          const row = { ...(u as UnitRow), weight_g: Number((u as UnitRow).weight_g) };
+          (grouped[row.ingredient_master_id] ??= []).push(row);
+        });
+        setUnitsByMaster(grouped);
+      }
 
       // 非公開バケットなので、画像がある材料の署名付きURLをまとめて発行（1時間有効）
       const paths = list
@@ -2192,6 +2647,18 @@ export default function MasterPage() {
   const handleSelectAll = () => {
     setSelectedCategory('すべて');
     setSeasonOnly(false);
+  };
+
+  // 単位の編集後：この材料の単位一覧を差し替える
+  const handleUnitsChange = (masterId: string, units: UnitRow[]) => {
+    setUnitsByMaster((prev) => ({ ...(prev ?? {}), [masterId]: units }));
+  };
+
+  // 基準の単位が変わったとき：一覧の「1単位あたり」表示にも反映する
+  const handleDefaultChange = (masterId: string, unit: string | null, weightG: number | null) => {
+    setItems((prev) =>
+      prev.map((i) => (i.id === masterId ? { ...i, default_unit: unit, unit_weight_g: weightG } : i)),
+    );
   };
 
   // いつもの商品の画像を登録（圧縮→Storageへアップロード→DBにパス保存→旧画像を削除）
@@ -2485,8 +2952,6 @@ export default function MasterPage() {
                   {isExpanded && (
                     <div className="border-t border-gray-100 px-4 py-3 text-sm">
                       <div className="mb-2 grid grid-cols-2 gap-x-4 gap-y-1 text-gray-600">
-                        <div>既定の単位：{item.default_unit ?? '―'}</div>
-                        <div>1単位の重さ：{fmt(item.unit_weight_g, 'g')}</div>
                         <div>いつもの商品：{item.usual_product_name ?? '―'}</div>
                         <div>購入店：{item.store_name ?? '―'}</div>
                         <div className="col-span-2">
@@ -2504,6 +2969,20 @@ export default function MasterPage() {
                             '通年（特になし）'
                           )}
                         </div>
+                      </div>
+
+                      {/* 単位の追加・編集・削除 */}
+                      <div className="mb-2">
+                        {unitsByMaster === null && !unitsFailed ? (
+                          <p className="text-xs text-gray-400">単位を読み込み中…</p>
+                        ) : (
+                          <IngredientUnitsEditor
+                            item={item}
+                            units={unitsFailed ? undefined : (unitsByMaster?.[item.id] ?? [])}
+                            onUnitsChange={handleUnitsChange}
+                            onDefaultChange={handleDefaultChange}
+                          />
+                        )}
                       </div>
 
                       {/* いつもの商品の画像：登録・変更・削除 */}
@@ -2700,12 +3179,11 @@ function NutrientRow({
     </div>
   );
 }
-echo ..
-..
+
 ===== src\pages\MenuPage.tsx =====
 
 // src/pages/MenuPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：①家族が候補・確定を変えたとき、すぐ画面に反映（Supabase Realtime）／②空欄メッセージのスワイプ方向を修正（レシピ一覧は左スワイプ）
+// 今回の変更：①家族が候補・確定を変えたとき、すぐ画面に反映（Supabase Realtime）／②空欄メッセージを「レシピ一覧で右スワイプ」に統一（レシピ一覧のスワイプを右向きに変更したため）
 // 前提：09_menu_status_migration.sql（plan_confirmed 列）と 11_cook_logs_migration.sql（cook_logs テーブル）を実行済み
 // 献立画面：日割りなし。「確定」と「候補」の2つのリストを、小さな行（料理名＋引用元）で並べる（ボタンなし・スワイプで操作）
 //   【候補】 → 右スワイプ：確定に追加 ／ ← 左スワイプ：削除（献立から外す。レシピは残る）
@@ -3104,7 +3582,7 @@ export default function MenuPage() {
           <div className="mt-4" />
           <SectionTitle icon="💭" title="候補" count={candidates.length} hint="→確定 ←削除" />
           {candidates.length === 0 ? (
-            <Empty text="候補はありません（レシピ一覧で左スワイプ／＋で追加）" />
+            <Empty text="候補はありません（レシピ一覧で右スワイプ／＋で追加）" />
           ) : (
             <div className="space-y-1">
               {candidates.map((r) => (
@@ -3221,24 +3699,26 @@ function MenuLine({ row: r, servings }: { row: MenuRow; servings: number }) {
     </Link>
   )
 }
-echo ..
-..
+
 ===== src\pages\RecipeDetailPage.tsx =====
 
 // src/pages/RecipeDetailPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：recipe_nutrition ビュー（01）、recipes.plan_confirmed 列（09）、cook_logs テーブル（11）を作成済みであること
 // 前提：12_ingredients_by_step.sql（steps.tip / ingredients.step_id / ingredients.group_label）を実行済みであること
+// 前提：ingredient_units テーブル（複数単位の対応）を作成済みであること
 // 今回の変更：
-//  ・材料を「工程ごと」に表示（使う順）。「① 工程名 → 材料 → → 本文 → POINT」の並び
-//  ・材料のグループ記号（A・B…）をオレンジの丸バッジで表示。工程の本文中の [A] もバッジにする
-//  ・工程に紐付いていない材料（古いレシピなど）は、これまで通り「材料」「作り方」を別々に表示
-//    （一部だけ紐付いている場合は、紐付いていない材料を「その他の材料」として先頭に表示）
+//  ・一番上に固定の帯（スクロールしても動かない）
+//      1行目：左＝「← 戻る」／右＝「追加」「履歴（回数つき）」「栄養素」ボタン
+//      2行目：料理名。その下に小さく「参照元・時間・カロリー・費用」
+//  ・「履歴」「栄養素」は、ボタンを押すと下から出る画面で表示（これまで本文に並んでいた内容を移動）
+//  ・「追加」は献立候補の追加／外す。押したあとに「元に戻す」付きのメッセージを表示
+//  ・材料は、新しい形式（工程ごとに材料が紐付いたレシピ）でも、まず全部の材料を「材料」表にまとめて表示
+//    その下の「作り方」に、各工程で使う材料 ＋ 作り方を表示（古い形式のレシピは、作り方のみ）
+//  ・人数切替（－ ○人前 ＋）は「材料」の見出しの右に移動（カロリー・費用・分量が連動。一覧・献立と共通の設定）
 // これまでの内容：
-//  ・「🍳 作った履歴」：献立で「作った」にした日付が、新しい順に並ぶ
-//  ・人数を変えられる（「－ 2人前 ＋」。レシピ一覧・献立と共通の設定）。カロリー・費用・栄養素・材料の分量が連動
-//  ・献立候補トグル（未追加／候補／確定）。追加は「候補」から。確定・作ったは献立画面で行う
+//  ・材料のグループ記号（A・B…）をオレンジの丸バッジで表示。工程の本文中の [A] もバッジにする
 //  ・カロリー／費用／栄養素は recipe_nutrition ビュー（材料マスタから計算）から表示
-//  ・計算できていない材料には「未計算」マーク
+//  ・計算できていない材料には「未計算」マーク（判定は材料マスタの単位表 ingredient_units に合わせてある）
 //  ・分量は「大さじ3」のように、大さじ・小さじは単位を先頭に表示
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom'
@@ -3255,14 +3735,27 @@ import { useServings } from '../lib/useServings'
 
 // 材料 ＋ 紐付いたマスタの単位情報（未計算の判定に使う）
 type IngredientRow = Ingredient & {
-  ingredient_master: { default_unit: string | null; unit_weight_g: number | null } | null
+  ingredient_master: {
+    default_unit: string | null
+    unit_weight_g: number | null
+    ingredient_units?: { unit: string; weight_g: number }[] | null
+  } | null
 }
 
 // 工程の中の材料のまとまり（グループ記号 A・B… がある材料は、同じ記号どうしで1つにまとめる）
-type IngBlock = { label: string | null; items: IngredientRow[] }
+type IngBlock = { label: string | null; stepId: string | null; items: IngredientRow[] }
 
 // recipe_nutrition ビューの1行
 type NutritionRow = Record<string, number | string | null>
+
+// 献立の状態（追加／外す、「元に戻す」で書き込む列）
+type PlanPatch = {
+  is_planned: boolean
+  plan_confirmed: boolean
+  planned_by: string | null
+  planned_at: string | null
+}
+type Toast = { message: string; onUndo: () => void }
 
 const LOG_PREVIEW = 10 // 作った履歴は、最初は新しい順に10件だけ表示
 
@@ -3290,6 +3783,9 @@ function isResolved(ing: IngredientRow): boolean {
   if (!ing.ingredient_master_id || !m) return false
   if (parseQty(ing.quantity) == null) return false
   if (ing.unit != null && ['g', 'ｇ', 'グラム'].includes(ing.unit)) return true
+  // マスタの単位表に、この材料の単位があって重さが入っていれば計算できる
+  if ((m.ingredient_units ?? []).some((u) => u.unit === ing.unit && Number(u.weight_g) > 0)) return true
+  // 単位表がまだ無い場合の保険（旧列）
   return m.default_unit != null && ing.unit === m.default_unit && m.unit_weight_g != null
 }
 
@@ -3349,18 +3845,19 @@ function buildBlocks(list: IngredientRow[]): IngBlock[] {
   for (const ing of list) {
     const label = ing.group_label
     if (label) {
-      const found = blocks.find((b) => b.label === label)
+      // 同じ記号でも、別の工程の材料はまとめない（全材料の表でも、工程ごとのA・Bが混ざらないように）
+      const found = blocks.find((b) => b.label === label && b.stepId === ing.step_id)
       if (found) {
         found.items.push(ing)
       } else {
-        blocks.push({ label, items: [ing] })
+        blocks.push({ label, stepId: ing.step_id, items: [ing] })
       }
     } else {
       const last = blocks[blocks.length - 1]
       if (last && last.label === null) {
         last.items.push(ing)
       } else {
-        blocks.push({ label: null, items: [ing] })
+        blocks.push({ label: null, stepId: ing.step_id, items: [ing] })
       }
     }
   }
@@ -3394,10 +3891,18 @@ export default function RecipeDetailPage() {
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [togglingPlanned, setTogglingPlanned] = useState(false)
-  const [showNutrients, setShowNutrients] = useState(false)
+  const [sheet, setSheet] = useState<'history' | 'nutrition' | null>(null) // 下から出る画面（履歴／栄養素）
+  const [toast, setToast] = useState<Toast | null>(null)
   const [servings, setServings] = useServings() // 何人前で表示するか（共通設定）
 
   const imageUrl = useRecipeImage(recipe?.image_path ?? null)
+
+  // 「元に戻す」メッセージは4秒で自動的に消す
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 4000)
+    return () => clearTimeout(t)
+  }, [toast])
 
   useEffect(() => {
     if (!id) return
@@ -3411,7 +3916,7 @@ export default function RecipeDetailPage() {
         supabase.from('recipes').select('*').eq('id', id).single(),
         supabase
           .from('ingredients')
-          .select('*, ingredient_master(default_unit, unit_weight_g)')
+          .select('*, ingredient_master(default_unit, unit_weight_g, ingredient_units(unit, weight_g))')
           .eq('recipe_id', id)
           .order('sort_order'),
         supabase.from('steps').select('*').eq('recipe_id', id).order('step_number'),
@@ -3475,28 +3980,44 @@ export default function RecipeDetailPage() {
     }
   }, [id])
 
-  // 献立候補の追加／外す。追加は「候補」から。外すときは確定も解除する
-  const handleTogglePlanned = async () => {
-    if (!recipe) return
+  // 献立の状態を書き込む（成功したら画面にも反映）。「元に戻す」にも使う
+  const writePlan = async (next: PlanPatch): Promise<boolean> => {
+    if (!recipe) return false
     setTogglingPlanned(true)
-    const adding = !recipe.is_planned
-    const { data, error } = await supabase
-      .from('recipes')
-      .update({
-        is_planned: adding,
-        plan_confirmed: false,
-        planned_by: adding ? session.user.id : null,
-        planned_at: adding ? new Date().toISOString() : null,
-      })
-      .eq('id', recipe.id)
-      .select('id')
+    const { data, error } = await supabase.from('recipes').update(next).eq('id', recipe.id).select('id')
     setTogglingPlanned(false)
-
     if (error || !data || data.length === 0) {
       alert('更新に失敗しました: ' + (error?.message ?? '権限を確認してください'))
-      return
+      return false
     }
-    setRecipe({ ...recipe, is_planned: adding, plan_confirmed: false })
+    setRecipe((r) => (r ? { ...r, ...next } : r))
+    return true
+  }
+
+  // 献立候補の追加／外す。追加は「候補」から。外すときは確定も解除する（確定・作ったは献立画面で行う）
+  const handleTogglePlanned = async () => {
+    if (!recipe || togglingPlanned) return
+    const before: PlanPatch = {
+      is_planned: recipe.is_planned,
+      plan_confirmed: recipe.plan_confirmed,
+      planned_by: recipe.planned_by,
+      planned_at: recipe.planned_at,
+    }
+    const adding = !recipe.is_planned
+    const ok = await writePlan({
+      is_planned: adding,
+      plan_confirmed: false,
+      planned_by: adding ? session.user.id : null,
+      planned_at: adding ? new Date().toISOString() : null,
+    })
+    if (!ok) return
+    setToast({
+      message: adding ? '献立候補に追加しました' : '献立から外しました',
+      onUndo: () => {
+        void writePlan(before)
+        setToast(null)
+      },
+    })
   }
 
   // 未計算の材料（分量が「適量」などのものは数えない）
@@ -3518,20 +4039,16 @@ export default function RecipeDetailPage() {
     return { main, micro }
   }, [])
 
-  // 材料を工程ごとに分ける。1つも工程に紐付いていないレシピは、これまで通りの表示にする
-  const stepLayout = useMemo(() => {
+  // 作り方の各工程に出す材料（工程に紐付いたものだけ）。1つも紐付いていないレシピ（古い形式）は、工程に材料を出さない
+  const stepIngredients = useMemo(() => {
     const stepIds = new Set(steps.map((s) => s.id))
     const byStep = new Map<string, IngredientRow[]>()
-    const others: IngredientRow[] = []
-    const linked = ingredients.some((i) => i.step_id != null && stepIds.has(i.step_id))
     for (const ing of ingredients) {
-      if (linked && ing.step_id != null && stepIds.has(ing.step_id)) {
+      if (ing.step_id != null && stepIds.has(ing.step_id)) {
         byStep.set(ing.step_id, [...(byStep.get(ing.step_id) ?? []), ing])
-      } else {
-        others.push(ing)
       }
     }
-    return { linked, byStep, others }
+    return byStep
   }, [ingredients, steps])
 
   if (loading) {
@@ -3562,6 +4079,7 @@ export default function RecipeDetailPage() {
   const costN = costPer != null ? costPer * servings : null
   const factor = servings / recipe.servings // 材料の分量を増減する倍率
   const unresolvedCount = unresolvedSet.size
+  const uncertain = unresolvedCount > 0 || nutritionFailed // 計算に含まれていない材料がある
 
   // 献立の状態：未追加／候補／確定
   const planState: 'none' | 'candidate' | 'confirmed' = !recipe.is_planned
@@ -3575,6 +4093,71 @@ export default function RecipeDetailPage() {
 
   return (
     <div className="max-w-md mx-auto pb-6">
+      {/* ===== 一番上に固定：①ボタンの帯 ②料理名＋参照元・時間・カロリー・費用 ===== */}
+      <header className="sticky top-0 z-40 border-b border-gray-200 bg-white px-3 pb-2 pt-2 shadow-sm">
+        {/* ①左：戻る ／ 右：追加・履歴（回数つき）・栄養素 */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => navigate('/recipes')}
+            aria-label="一覧に戻る"
+            className="shrink-0 rounded-full bg-gray-100 px-3 py-1.5 text-sm font-semibold text-gray-700 active:bg-gray-200"
+          >
+            ← 戻る
+          </button>
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            <button
+              onClick={handleTogglePlanned}
+              disabled={togglingPlanned}
+              aria-label={
+                planState === 'none'
+                  ? '献立候補に追加する'
+                  : planState === 'candidate'
+                    ? '献立候補から外す'
+                    : '献立から外す'
+              }
+              className={`whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-bold disabled:opacity-50 ${
+                planState === 'none'
+                  ? 'bg-amber-500 text-white'
+                  : planState === 'candidate'
+                    ? 'border border-amber-400 bg-amber-100 text-amber-700'
+                    : 'border border-green-400 bg-green-100 text-green-700'
+              }`}
+            >
+              {planState === 'none' && '＋ 追加'}
+              {planState === 'candidate' && '✓ 候補'}
+              {planState === 'confirmed' && '✓ 確定'}
+            </button>
+            <button
+              onClick={() => setSheet('history')}
+              className="whitespace-nowrap rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 active:bg-gray-100"
+            >
+              🍳 履歴 {recipe.cook_count}
+            </button>
+            <button
+              onClick={() => setSheet('nutrition')}
+              className="whitespace-nowrap rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-bold text-gray-700 active:bg-gray-100"
+            >
+              栄養素
+            </button>
+          </div>
+        </div>
+
+        {/* ②料理名 ＋ 下に小さく：参照元・時間・カロリー・費用（選んだ人数ぶん） */}
+        <h1 className="mt-1.5 truncate text-lg font-bold leading-tight text-gray-900">{recipe.dish_name}</h1>
+        <p className="mt-0.5 flex items-center gap-1 text-[11px] leading-tight text-gray-500">
+          {recipe.source_name && <span className="min-w-0 truncate">{recipe.source_name}</span>}
+          <span className="shrink-0 whitespace-nowrap">
+            {recipe.source_name ? '・' : ''}⏱ {recipe.cooking_time_minutes != null ? `${recipe.cooking_time_minutes}分` : '―'}
+            {' ・ '}
+            {fmtVal(kcalN, 'kcal')}
+            {' ・ '}
+            {fmtVal(costN, '円')}
+            {uncertain && <span className="text-amber-600">※</span>}
+            <span className="text-gray-400">（{servings}人前）</span>
+          </span>
+        </p>
+      </header>
+
       {/* 写真 */}
       <div className="w-full h-56 bg-gray-100 flex items-center justify-center">
         {imageUrl ? (
@@ -3585,204 +4168,70 @@ export default function RecipeDetailPage() {
       </div>
 
       <div className="p-4">
-        {/* 戻るボタン */}
-        <button onClick={() => navigate('/recipes')} className="text-sm text-gray-500 mb-3">
-          ← 一覧に戻る
-        </button>
-
-        <h1 className="text-xl font-bold text-gray-900">{recipe.dish_name}</h1>
         {(recipe.genre || recipe.category) && (
-          <p className="text-sm text-gray-400 mt-0.5">
+          <p className="text-xs text-gray-400">
             {recipe.genre}
             {recipe.genre && recipe.category ? ' ・ ' : ''}
             {recipe.category}
           </p>
         )}
-        <p className="text-xs text-gray-400 mt-1">
-          ⏱ {recipe.cooking_time_minutes != null ? `${recipe.cooking_time_minutes}分` : '―'}
-          {' ・ '}
-          {recipe.cook_count}回作った
-        </p>
 
-        {/* 献立候補トグル（確定・作ったは献立画面で行う） */}
-        <button
-          onClick={handleTogglePlanned}
-          disabled={togglingPlanned}
-          className={`mt-4 w-full rounded-lg py-2.5 font-semibold transition disabled:opacity-50 ${
-            planState === 'none'
-              ? 'bg-amber-500 text-white'
-              : planState === 'candidate'
-                ? 'bg-amber-100 text-amber-700 border border-amber-400'
-                : 'bg-green-100 text-green-700 border border-green-400'
-          }`}
-        >
-          {planState === 'none' && '献立候補に追加する'}
-          {planState === 'candidate' && '✓ 献立候補に入っています(タップで外す)'}
-          {planState === 'confirmed' && '✓ 献立に確定済みです(タップで外す)'}
-        </button>
-        {planState !== 'none' && (
-          <p className="mt-1 text-center text-[11px] text-gray-400">
-            確定・作ったの操作は、下の「献立」タブで行えます
-          </p>
-        )}
-
-        {/* 人数の切替（カロリー・費用・栄養素・材料の分量に反映） */}
-        <div className="mt-4 flex items-center justify-between">
-          <span className="text-sm font-semibold text-gray-800">何人前で見る？</span>
-          <ServingsStepper value={servings} onChange={setServings} />
-        </div>
-
-        {/* カロリー・費用（材料マスタから計算。選んだ人数ぶん） */}
-        <div className="grid grid-cols-2 gap-3 mt-3">
-          <div className="bg-white rounded-xl shadow-sm p-3 text-center">
-            <p className="text-xs text-gray-400">カロリー({servings}人前)</p>
-            <p className="text-lg font-semibold text-gray-800">{fmtVal(kcalN, 'kcal')}</p>
-            {servings !== 1 && kcalPer != null && (
-              <p className="text-xs text-gray-400">1人前 {fmtVal(kcalPer, 'kcal')}</p>
-            )}
-          </div>
-          <div className="bg-white rounded-xl shadow-sm p-3 text-center">
-            <p className="text-xs text-gray-400">費用({servings}人前)</p>
-            <p className="text-lg font-semibold text-gray-800">{fmtVal(costN, '円')}</p>
-            {servings !== 1 && costPer != null && (
-              <p className="text-xs text-gray-400">1人前 {fmtVal(costPer, '円')}</p>
-            )}
-          </div>
-        </div>
-
-        {/* 計算できなかったときの注意 */}
-        {nutritionFailed && (
-          <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-            栄養・費用の計算ビュー（recipe_nutrition）を読み込めませんでした。
-          </p>
-        )}
-        {unresolvedCount > 0 && (
-          <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-            ※ 計算できていない材料が{unresolvedCount}件あります（下の材料に「未計算」と表示）。その分は金額・栄養に含まれていません。
-          </p>
-        )}
-        <p className="mt-2 text-[11px] text-gray-400">
-          ※ 材料マスタの単価・栄養価から計算した目安です。
-        </p>
-
-        {/* 栄養素（タップで開閉） */}
-        <section className="mt-4">
-          <button
-            onClick={() => setShowNutrients((v) => !v)}
-            className="flex w-full items-center justify-between rounded-xl bg-white px-4 py-3 shadow-sm"
-          >
-            <span className="font-semibold text-gray-800">栄養素（{servings}人前）</span>
-            <span className="text-sm text-gray-400">{showNutrients ? '閉じる ▲' : '開く ▼'}</span>
-          </button>
-
-          {showNutrients && (
-            <div className="mt-2 rounded-xl bg-white px-4 py-3 text-sm shadow-sm">
-              {nutrition == null ? (
-                <p className="text-gray-400">栄養データがありません。</p>
-              ) : (
-                <>
-                  <div className="mb-1 text-xs font-semibold text-gray-500">栄養価</div>
-                  {nutrientRows.main.map((n) => (
-                    <NutrientLine
-                      key={String(n.key)}
-                      label={n.label}
-                      indent={INDENT_KEYS.includes(String(n.key))}
-                      value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
-                    />
-                  ))}
-                  <div className="mb-1 mt-3 border-t border-gray-100 pt-2 text-xs font-semibold text-gray-500">
-                    ビタミン・ミネラル
-                  </div>
-                  {nutrientRows.micro.map((n) => (
-                    <NutrientLine
-                      key={String(n.key)}
-                      label={n.label}
-                      value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
-                    />
-                  ))}
-                  <p className="mt-3 text-[11px] text-gray-400">
-                    ※ マスタに値が入っていない材料は、その栄養素の合計に含まれません。
-                  </p>
-                </>
-              )}
-            </div>
-          )}
-        </section>
-
-        {stepLayout.linked ? (
-          /* 材料と作り方：工程ごと（使う順） */
-          <section className="mt-6">
-            <h2 className="font-semibold text-gray-800 mb-2">
-              材料と作り方({servings}人前)
+        {/* 材料表（新しい形式のレシピでも、まず全部の材料をここにまとめて表示） */}
+        <section className="mt-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h2 className="font-semibold text-gray-800">
+              材料
               {servings !== recipe.servings && (
                 <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
               )}
             </h2>
-            {stepLayout.others.length > 0 && (
-              <div className="mb-3 rounded-xl bg-white p-3 shadow-sm">
-                <p className="mb-1 text-xs font-semibold text-gray-500">その他の材料</p>
-                <StepIngredients list={stepLayout.others} factor={factor} unresolvedSet={unresolvedSet} />
-              </div>
-            )}
+            <ServingsStepper value={servings} onChange={setServings} />
+          </div>
+          {ingredients.length === 0 ? (
+            <p className="text-sm text-gray-400">材料情報はありません。</p>
+          ) : (
+            <div className="rounded-xl bg-white px-4 py-1 shadow-sm">
+              <StepIngredients list={ingredients} factor={factor} unresolvedSet={unresolvedSet} />
+            </div>
+          )}
+        </section>
+
+        {/* 作り方（新しい形式なら、各工程に「その工程で使う材料」も表示） */}
+        <section className="mt-6">
+          <h2 className="font-semibold text-gray-800 mb-2">作り方</h2>
+          {steps.length === 0 ? (
+            <p className="text-sm text-gray-400">工程情報はありません。</p>
+          ) : (
             <ol className="space-y-3">
               {steps.map((step) => (
                 <StepCard
                   key={step.id}
                   step={step}
-                  ingredients={stepLayout.byStep.get(step.id) ?? []}
+                  ingredients={stepIngredients.get(step.id) ?? []}
                   factor={factor}
                   unresolvedSet={unresolvedSet}
                 />
               ))}
             </ol>
+          )}
+        </section>
+
+        {/* 参考元情報 */}
+        {(recipe.source_name || recipe.source_url) && (
+          <section className="mt-6 text-xs text-gray-400">
+            <p>参考元: {recipe.source_name}</p>
+            {recipe.source_url && (
+              <a href={recipe.source_url} target="_blank" rel="noreferrer" className="underline break-all">
+                {recipe.source_url}
+              </a>
+            )}
           </section>
-        ) : (
-          <>
-            {/* 材料 */}
-            <section className="mt-6">
-              <h2 className="font-semibold text-gray-800 mb-2">
-                材料({servings}人前)
-                {servings !== recipe.servings && (
-                  <span className="ml-2 text-xs font-normal text-gray-400">元のレシピは{recipe.servings}人前</span>
-                )}
-              </h2>
-              {ingredients.length === 0 ? (
-                <p className="text-sm text-gray-400">材料情報はありません。</p>
-              ) : (
-                <div className="rounded-xl bg-white px-4 py-1 shadow-sm">
-                  <StepIngredients list={ingredients} factor={factor} unresolvedSet={unresolvedSet} />
-                </div>
-              )}
-            </section>
-
-            {/* 作り方 */}
-            <section className="mt-6">
-              <h2 className="font-semibold text-gray-800 mb-2">作り方</h2>
-              {steps.length === 0 ? (
-                <p className="text-sm text-gray-400">工程情報はありません。</p>
-              ) : (
-                <ol className="space-y-3">
-                  {steps.map((step) => (
-                    <StepCard
-                      key={step.id}
-                      step={step}
-                      ingredients={[]}
-                      factor={factor}
-                      unresolvedSet={unresolvedSet}
-                    />
-                  ))}
-                </ol>
-              )}
-            </section>
-          </>
         )}
+      </div>
 
-        {/* 作った履歴（献立で「作った」にした日付） */}
-        <section className="mt-6">
-          <h2 className="font-semibold text-gray-800 mb-2">
-            🍳 作った履歴
-            <span className="ml-2 text-xs font-normal text-gray-400">{recipe.cook_count}回</span>
-          </h2>
+      {/* 履歴（作った日付。新しい順） */}
+      {sheet === 'history' && (
+        <Sheet title={`🍳 作った履歴（${recipe.cook_count}回）`} onClose={() => setSheet(null)}>
           {cookLogsFailed ? (
             <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
               作った履歴を読み込めませんでした（11_cook_logs_migration.sql を実行済みか確認してください）。
@@ -3793,7 +4242,7 @@ export default function RecipeDetailPage() {
             </p>
           ) : (
             <>
-              <ul className="bg-white rounded-xl shadow-sm divide-y divide-gray-100">
+              <ul className="divide-y divide-gray-100 rounded-xl border border-gray-100">
                 {shownLogs.map((log) => (
                   <li key={log.id} className="px-4 py-2 text-sm text-gray-700">
                     {formatCookedDate(log.cooked_on)}
@@ -3815,19 +4264,110 @@ export default function RecipeDetailPage() {
               )}
             </>
           )}
-        </section>
+        </Sheet>
+      )}
 
-        {/* 参考元情報 */}
-        {(recipe.source_name || recipe.source_url) && (
-          <section className="mt-6 text-xs text-gray-400">
-            <p>参考元: {recipe.source_name}</p>
-            {recipe.source_url && (
-              <a href={recipe.source_url} target="_blank" rel="noreferrer" className="underline break-all">
-                {recipe.source_url}
-              </a>
+      {/* 栄養素（カロリー・費用の内訳 ＋ 栄養価） */}
+      {sheet === 'nutrition' && (
+        <Sheet title={`栄養素（${servings}人前）`} onClose={() => setSheet(null)}>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-xl bg-gray-50 p-3 text-center">
+              <p className="text-xs text-gray-400">カロリー({servings}人前)</p>
+              <p className="text-lg font-semibold text-gray-800">{fmtVal(kcalN, 'kcal')}</p>
+              {servings !== 1 && kcalPer != null && (
+                <p className="text-xs text-gray-400">1人前 {fmtVal(kcalPer, 'kcal')}</p>
+              )}
+            </div>
+            <div className="rounded-xl bg-gray-50 p-3 text-center">
+              <p className="text-xs text-gray-400">費用({servings}人前)</p>
+              <p className="text-lg font-semibold text-gray-800">{fmtVal(costN, '円')}</p>
+              {servings !== 1 && costPer != null && (
+                <p className="text-xs text-gray-400">1人前 {fmtVal(costPer, '円')}</p>
+              )}
+            </div>
+          </div>
+          {nutritionFailed && (
+            <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              栄養・費用の計算ビュー（recipe_nutrition）を読み込めませんでした。
+            </p>
+          )}
+          {unresolvedCount > 0 && (
+            <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              ※ 計算できていない材料が{unresolvedCount}件あります（材料に「未計算」と表示）。その分は金額・栄養に含まれていません。
+            </p>
+          )}
+          <p className="mt-2 text-[11px] text-gray-400">※ 材料マスタの単価・栄養価から計算した目安です。</p>
+
+          <div className="mt-3 border-t border-gray-100 pt-3 text-sm">
+            {nutrition == null ? (
+              <p className="text-gray-400">栄養データがありません。</p>
+            ) : (
+              <>
+                <div className="mb-1 text-xs font-semibold text-gray-500">栄養価</div>
+                {nutrientRows.main.map((n) => (
+                  <NutrientLine
+                    key={String(n.key)}
+                    label={n.label}
+                    indent={INDENT_KEYS.includes(String(n.key))}
+                    value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
+                  />
+                ))}
+                <div className="mb-1 mt-3 border-t border-gray-100 pt-2 text-xs font-semibold text-gray-500">
+                  ビタミン・ミネラル
+                </div>
+                {nutrientRows.micro.map((n) => (
+                  <NutrientLine
+                    key={String(n.key)}
+                    label={n.label}
+                    value={fmtVal(nvPer(nutrition, servingCol(String(n.key)), servings), n.unit)}
+                  />
+                ))}
+                <p className="mt-3 text-[11px] text-gray-400">
+                  ※ マスタに値が入っていない材料は、その栄養素の合計に含まれません。
+                </p>
+              </>
             )}
-          </section>
-        )}
+          </div>
+        </Sheet>
+      )}
+
+      {/* 追加／外したあとに出る「元に戻す」メッセージ */}
+      {toast && (
+        <div
+          className="pointer-events-none fixed inset-x-0 z-50 flex justify-center px-3"
+          style={{ bottom: 'calc(4.5rem + env(safe-area-inset-bottom))' }}
+        >
+          <div className="pointer-events-auto flex max-w-md items-center gap-3 rounded-xl bg-gray-900 px-4 py-2.5 text-sm text-white shadow-lg">
+            <span className="min-w-0 flex-1 truncate">{toast.message}</span>
+            <button onClick={toast.onUndo} className="shrink-0 font-bold text-amber-300">
+              元に戻す
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 下から出てくる画面（履歴・栄養素）。外側をタップするか「閉じる」で閉じる
+function Sheet({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-end bg-black/40 sm:items-center sm:justify-center"
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[85vh] w-full overflow-y-auto rounded-t-2xl bg-white px-4 pt-4 sm:max-w-md sm:rounded-2xl"
+        style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h3 className="min-w-0 truncate text-base font-bold text-gray-900">{title}</h3>
+          <button onClick={onClose} className="shrink-0 rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-500">
+            閉じる
+          </button>
+        </div>
+        {children}
       </div>
     </div>
   )
@@ -3973,16 +4513,16 @@ function StepCard({
     </li>
   )
 }
-echo ..
-..
+
 ===== src\pages\RecipeListPage.tsx =====
 
 // src/pages/RecipeListPage.tsx（ファイル全体。これで丸ごと置き換えてください）
+// 今回の変更：リスト表示のスワイプを「右スワイプ」で献立候補に追加／献立から外す に変更（これまでは左スワイプ）
 // 前提：recipe_nutrition ビュー（01）と、recipes.plan_confirmed 列（09）を作成済みであること
 // 機能：
 //  ・検索ボックスの右横に、写真／リスト切替
 //  ・ジャンル（すべて・和食・洋食・中華・エスニック・その他）を1行、サブカテゴリ（6分類）を1行
-//  ・リスト表示：カードを左へスワイプ →「献立候補」に追加／献立から外す（離すと確定）
+//  ・リスト表示：カードを右へスワイプ →「献立候補」に追加／献立から外す（離すと確定）
 //  ・値は、右上の人数（共通設定）あたりで表示。「－ 2人前 ＋」で変更（詳細・献立画面と共通）
 //  ・写真表示：サムネ右上の＋ボタンで 候補に追加／外す
 //  ・追加／解除のあとに「元に戻す」付きのメッセージを数秒表示
@@ -4462,7 +5002,7 @@ export default function RecipeListPage() {
         <div className="mt-2 flex items-center justify-between gap-2 text-xs text-gray-500">
           <span className="shrink-0">{loading ? '読み込み中…' : `${sorted.length}件`}</span>
           <span className="min-w-0 truncate text-[10px] text-gray-400">
-            {viewMode === 'list' ? '← 左スワイプで献立候補に追加' : '右上の＋で献立候補に追加'}
+            {viewMode === 'list' ? '右スワイプで献立候補に追加 →' : '右上の＋で献立候補に追加'}
           </span>
           <ServingsStepper value={servings} onChange={setServings} />
         </div>
@@ -4498,8 +5038,8 @@ export default function RecipeListPage() {
             : sorted.map((r) => (
                 <SwipeRow
                   key={r.id}
-                  left={r.is_planned ? SWIPE_REMOVE : SWIPE_ADD}
-                  onSwipeLeft={() => togglePlanned(r)}
+                  right={r.is_planned ? SWIPE_REMOVE : SWIPE_ADD}
+                  onSwipeRight={() => togglePlanned(r)}
                 >
                   <ListCard
                     recipe={r}
@@ -4551,7 +5091,7 @@ function PlanBadge({ recipe }: { recipe: Pick<Recipe, 'is_planned' | 'plan_confi
   )
 }
 
-// ---------- スワイプ時の表示（左スワイプ：献立候補に追加／献立から外す） ----------
+// ---------- スワイプ時の表示（右スワイプ：献立候補に追加／献立から外す） ----------
 const SWIPE_ADD: SwipeAction = { label: '＋ 献立候補', readyLabel: '離して追加', className: 'bg-orange-500' }
 const SWIPE_REMOVE: SwipeAction = { label: '献立から外す', readyLabel: '離して外す', className: 'bg-gray-500' }
 
@@ -4721,10 +5261,8 @@ function Chip({
     </button>
   )
 }
-echo ..
-..
-===== src\pages\SettingsPage.tsx =====
 
+===== src\pages\SettingsPage.tsx =====
 // src/pages/SettingsPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // ※ もしここに「パスキー（FaceID）登録ボタン」などを自分で追加済みなら、全文を置き換えずに
 //    <ShoppingCategoryOrderSettings /> の1行と、その import だけを足してください。
@@ -4749,10 +5287,8 @@ export default function SettingsPage() {
     </div>
   )
 }
-echo ..
-..
-===== src\pages\ShoppingPage.tsx =====
 
+===== src\pages\ShoppingPage.tsx =====
 // src/pages/ShoppingPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 今回の変更：家族が追加・チェック・削除・並べ替えをしたとき、すぐ画面に反映（Supabase Realtime）
 // 前提：10_shopping_migration.sql を実行済み
@@ -5361,10 +5897,8 @@ function ItemRow({ item, onToggle }: { item: ShoppingItem; onToggle: () => void 
     </div>
   )
 }
-echo ..
-..
-===== src\types\cookLog.ts =====
 
+===== src\types\cookLog.ts =====
 // src/types/cookLog.ts（新規作成）
 // 「作った」履歴の型定義（テーブル: cook_logs）
 export type CookLog = {
@@ -5375,10 +5909,8 @@ export type CookLog = {
   cooked_by: string | null
   created_at: string
 }
-echo ..
-..
-===== src\types\ingredient.ts =====
 
+===== src\types\ingredient.ts =====
 export type IngredientCategory =
   | '野菜'
   | '肉'
@@ -5431,10 +5963,8 @@ export interface IngredientMaster {
   created_at: string;
   updated_at: string;
   
-}echo ..
-..
+}
 ===== src\types\recipe.ts =====
-
 // src/types/recipe.ts（ファイル全体。これで丸ごと置き換えてください）
 // 変更点：Ingredient型に step_id・group_label、Step型に tip を追加（12_ingredients_by_step.sql に対応）
 // （以前の変更点：Recipe型に plan_confirmed を追加）
@@ -5496,10 +6026,8 @@ export type RecipeWithDetail = Recipe & {
   ingredients: Ingredient[]
   steps: Step[]
 }
-echo ..
-..
-===== src\types\shopping.ts =====
 
+===== src\types\shopping.ts =====
 // src/types/shopping.ts（新規作成）
 // 買い物リストの型定義（テーブル: shopping_items）
 export type ShoppingItem = {
@@ -5520,5 +6048,529 @@ export type ShoppingItem = {
   note: string | null // どのレシピ用か（例：肉じゃが・カレーライス）
   created_at: string
 }
-echo ..
-..
+
+===== supabase\functions\analyze-recipe\index.ts =====
+// supabase/functions/analyze-recipe/index.ts
+// 写真・テキストからレシピを解析して、プレビュー用のJSONを返す(保存はしない)。
+// 必要なSecrets: GEMINI_MODEL(モデル名。全員共通)
+// APIキーは「呼んだ人」ごとに user_gemini_keys テーブルから読む(各自が自分のキーを登録)。
+// SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY は Supabase が自動で渡す。
+
+import { createClient } from "npm:@supabase/supabase-js@2";
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+const GENRES = ["和食", "洋食", "中華", "エスニック", "その他"] as const;
+const CATEGORIES = [
+  "主菜",
+  "副菜・つまみ",
+  "汁物・スープ",
+  "麺・丼・ワンプレート",
+  "デザート",
+  "ソース・調味料",
+] as const;
+
+const MAX_TEXT_CHARS = 20000;
+const MAX_IMAGES = 4;
+const MAX_IMAGE_BASE64_CHARS = 5_000_000; // 約3.7MB。端末側で1280px/JPEG80%に圧縮済みの想定
+const ALLOWED_MIME = ["image/jpeg", "image/png", "image/webp"];
+const SKIP_QTY = ["少々", "適量", "適宜", "ひとつまみ", "少量", "お好みで", "お好み"];
+
+type MasterRow = {
+  id: string;
+  ingredient_name: string;
+  category: string;
+  ingredient_units: { unit: string; weight_g: number; is_default: boolean }[];
+};
+
+// ---------- 共通の返し方 ----------
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...CORS, "Content-Type": "application/json" },
+  });
+}
+// 想定内のエラーは 200 で返す(ブラウザ側で中身を読みやすくするため)
+function fail(code: string, message: string) {
+  return json({ ok: false, code, message });
+}
+
+const norm = (s: string) => s.normalize("NFKC").replace(/\s+/g, "").toLowerCase();
+
+function normUnit(u: string): string {
+  const n = (u ?? "").normalize("NFKC").trim();
+  if (["g", "gram", "グラム", "ｇ"].includes(n.toLowerCase())) return "g";
+  return n;
+}
+
+function isNumericQty(q: string): boolean {
+  const n = q.normalize("NFKC").trim();
+  return /^\d+(\.\d+)?$/.test(n) || /^\d+\/\d+$/.test(n);
+}
+
+// 工程の本文の角かっこを整える。
+// アプリは [A] のような「英大文字1文字」だけをグループ記号のバッジにする。
+// それ以外の [サラダ油] などは、角かっこを外して中身だけ残す。
+function cleanBrackets(text: string | null | undefined): string {
+  return String(text ?? "").replace(/[\[［]([^\]］]*)[\]］]/g, (_m, inner: string) => {
+    const t = inner.normalize("NFKC").trim();
+    return /^[A-Z]$/.test(t) ? `[${t}]` : inner;
+  });
+}
+
+// ---------- Gemini に渡すスキーマ ----------
+const responseSchema = {
+  type: "OBJECT",
+  properties: {
+    dish_name: { type: "STRING" },
+    source_name: { type: "STRING", nullable: true },
+    genre: { type: "STRING", enum: [...GENRES] },
+    category: { type: "STRING", enum: [...CATEGORIES] },
+    servings: { type: "INTEGER" },
+    cooking_time_minutes: { type: "INTEGER", nullable: true },
+    steps: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          step_number: { type: "INTEGER" },
+          step_name: { type: "STRING" },
+          description: { type: "STRING" },
+          tip: { type: "STRING", nullable: true },
+        },
+        required: ["step_number", "step_name", "description"],
+      },
+    },
+    ingredients: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          ingredient_name: { type: "STRING" },
+          master_name: { type: "STRING", nullable: true },
+          quantity: { type: "STRING" },
+          unit: { type: "STRING" },
+          preparation: { type: "STRING", nullable: true },
+          step_number: { type: "INTEGER", nullable: true },
+          group_label: { type: "STRING", nullable: true },
+        },
+        required: ["ingredient_name", "quantity", "unit"],
+      },
+    },
+    warnings: { type: "ARRAY", items: { type: "STRING" } },
+  },
+  required: [
+    "dish_name",
+    "genre",
+    "category",
+    "servings",
+    "steps",
+    "ingredients",
+    "warnings",
+  ],
+};
+
+function buildSystemPrompt(masterLines: string): string {
+  return `あなたは家庭向けレシピ管理アプリの、レシピ抽出担当です。
+入力(画像またはテキスト)に書かれたレシピを、指定のJSONスキーマで出力してください。
+
+# 基本ルール
+- 入力に書かれていない情報を作らない。読み取れない・書かれていない項目は null か空にし、warnings に理由を書く。
+- 文章は原文の言葉をできるだけそのまま使う。言い換えたり、材料名を勝手に詳しくしたりしない(例:原文が「油」なら「油」のまま。「サラダ油」にしない)。
+- dish_name は料理名のみ(「簡単!」などの装飾は除く)。
+- servings は入力に書かれた人数(○人前・○人分)をそのまま整数で。換算しない。書かれていなければ 2 にして warnings に書く。
+- genre は ${GENRES.join(" / ")} から1つ。category は ${CATEGORIES.join(" / ")} から1つ。
+- source_name は、投稿者・著者・店名など作った人が分かるときだけ。分からなければ null。
+- cooking_time_minutes は料理全体の調理時間が書かれているときだけ整数で。無ければ null。
+
+# 材料
+- ingredient_name は入力に書かれた名前。master_name は下の「材料マスタ」の名前と完全一致するものがあるときだけ入れる。似ているだけ・無いときは null(無理に合わせない)。
+- quantity は半角数字だけの文字列にする(例:"2" "0.5" "1/2")。「1と1/2」は "1.5"、「2〜3」は中間の "2.5" にして warnings に書く。
+- 「少々」「適量」「適宜」「ひとつまみ」はそのまま quantity に入れ、unit は空文字。
+- unit は単位だけ(例:"g" "大さじ" "小さじ" "個" "ml")。「大さじ1」は quantity="1", unit="大さじ"。マスタに該当材料があるときは、その材料の単位の中から選ぶ。合う単位が無いときは書かれたままの単位にする。
+- 「A:」「Aの材料」のようにまとめて書かれた材料は group_label="A"(B, C...も同様)。それ以外は null。
+- preparation は「みじん切り」「皮をむく」などの下ごしらえ。無ければ null。
+- step_number は、その材料を最初に使う工程の番号。判断できなければ null。
+
+# 工程
+- step_number は 1 から連番。step_name は短い見出し(例:「下ごしらえ」「炒める」)。description は本文。
+- 本文は原文のまま。材料名を [ ] で囲んではいけない。
+- [ ] を使ってよいのは、グループ記号を指すときだけ。アルファベット大文字1文字に限る(例:[A] [B])。それ以外の言葉には [ ] を付けない。
+- tip は「ポイント」「コツ」と書かれているときだけ。無ければ null。
+
+# warnings
+- 画像が不鮮明、分量が読めない、人数が不明、範囲を中間値にした、などユーザーが確認すべき点を日本語の短い文で。
+
+# 材料マスタ(「材料名 | 使える単位」)
+${masterLines}`;
+}
+
+// ---------- メイン ----------
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  if (req.method !== "POST") return json({ ok: false, code: "METHOD", message: "POSTで呼んでください" }, 405);
+
+  const model = Deno.env.get("GEMINI_MODEL");
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!model || !serviceKey) {
+    return fail("NOT_CONFIGURED", "サーバーの設定(GEMINI_MODEL など)が未登録です");
+  }
+
+  // --- ログイン確認(呼んだ人のJWTでDBを読む → RLSがそのまま効く) ---
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader) return json({ ok: false, code: "UNAUTHORIZED", message: "ログインが必要です" }, 401);
+
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } },
+  );
+  const { data: userData, error: userErr } = await supabase.auth.getUser();
+  if (userErr || !userData?.user) {
+    return json({ ok: false, code: "UNAUTHORIZED", message: "ログインが無効です" }, 401);
+  }
+
+  // --- 呼んだ人自身のGeminiキーを取得(サービスロールで読む。キーは画面には返さない) ---
+  const admin = createClient(Deno.env.get("SUPABASE_URL")!, serviceKey);
+  const { data: keyRow, error: keyErr } = await admin
+    .from("user_gemini_keys")
+    .select("api_key")
+    .eq("user_id", userData.user.id)
+    .maybeSingle();
+  if (keyErr) return fail("DB_ERROR", `キーを読めませんでした: ${keyErr.message}`);
+  if (!keyRow?.api_key) {
+    return fail("NO_API_KEY", "Gemini APIキーが未登録です。設定画面で、自分のキーを登録してください");
+  }
+  const apiKey: string = keyRow.api_key;
+
+  // --- 入力チェック ---
+  let body: {
+    source?: string;
+    text?: string;
+    images?: { mime: string; data: string }[];
+  };
+  try {
+    body = await req.json();
+  } catch {
+    return fail("BAD_REQUEST", "リクエストの形式が正しくありません");
+  }
+
+  const text = (body.text ?? "").trim();
+  const images = body.images ?? [];
+
+  if (!text && images.length === 0) return fail("EMPTY", "テキストか画像を入れてください");
+  if (text.length > MAX_TEXT_CHARS) return fail("TOO_LONG", `テキストが長すぎます(${MAX_TEXT_CHARS}文字まで)`);
+  if (images.length > MAX_IMAGES) return fail("TOO_MANY_IMAGES", `画像は${MAX_IMAGES}枚までです`);
+  for (const img of images) {
+    if (!ALLOWED_MIME.includes(img.mime)) return fail("BAD_IMAGE", "画像は JPEG / PNG / WebP だけ使えます");
+    if (!img.data || img.data.length > MAX_IMAGE_BASE64_CHARS) {
+      return fail("IMAGE_TOO_LARGE", "画像が大きすぎます。小さくしてからもう一度お試しください");
+    }
+  }
+
+  // --- 材料マスタ(名前+単位)を取得 ---
+  const { data: masterData, error: masterErr } = await supabase
+    .from("ingredient_master")
+    .select("id, ingredient_name, category, ingredient_units(unit, weight_g, is_default)")
+    .order("category")
+    .order("ingredient_name");
+  if (masterErr) return fail("DB_ERROR", `材料マスタを読めませんでした: ${masterErr.message}`);
+
+  const masters = (masterData ?? []) as MasterRow[];
+  const masterLines = masters
+    .map((m) => {
+      const units = [...(m.ingredient_units ?? [])]
+        .sort((a, b) => Number(b.is_default) - Number(a.is_default))
+        .map((u) => u.unit)
+        .join(",");
+      return `${m.ingredient_name} | ${units}`;
+    })
+    .join("\n");
+
+  // --- Gemini 呼び出し ---
+  const parts: Record<string, unknown>[] = [];
+  parts.push({
+    text: text
+      ? `次の入力からレシピを抽出してください。\n\n${text}`
+      : "添付の画像からレシピを抽出してください。",
+  });
+  for (const img of images) {
+    parts.push({ inline_data: { mime_type: img.mime, data: img.data } });
+  }
+
+  const geminiBody = {
+    systemInstruction: { parts: [{ text: buildSystemPrompt(masterLines) }] },
+    contents: [{ role: "user", parts }],
+    generationConfig: {
+      temperature: 0.2,
+      maxOutputTokens: 8192,
+      responseMimeType: "application/json",
+      responseSchema,
+    },
+  };
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify(geminiBody),
+    });
+  } catch (e) {
+    return fail("NETWORK", `AIに接続できませんでした: ${(e as Error).message}`);
+  }
+
+  if (res.status === 429) {
+    return fail("RATE_LIMIT", "あなたのキーの、本日(または今の1分間)の上限に達しました。少し待つか、明日もう一度お試しください");
+  }
+  if (res.status === 400 || res.status === 403) {
+    const t = (await res.clone().text()).slice(0, 400);
+    if (/API key|API_KEY|PERMISSION_DENIED/i.test(t)) {
+      return fail("BAD_API_KEY", "登録されたAPIキーが使えませんでした。設定画面でキーを入れ直してください");
+    }
+  }
+  if (!res.ok) {
+    const detail = (await res.text()).slice(0, 300);
+    // 404=モデル名違い・提供終了、400/403=キー違い
+    console.error("Gemini error", res.status, detail);
+    return fail("AI_ERROR", `AIの呼び出しに失敗しました(${res.status})`);
+  }
+
+  const gem = await res.json();
+  if (gem?.promptFeedback?.blockReason) {
+    return fail("BLOCKED", "入力の内容がAIに受け付けられませんでした。別の写真・テキストでお試しください");
+  }
+  const raw = (gem?.candidates?.[0]?.content?.parts ?? [])
+    .map((p: { text?: string }) => p.text ?? "")
+    .join("");
+  if (!raw) return fail("EMPTY_RESPONSE", "AIから結果が返りませんでした。もう一度お試しください");
+
+  // deno-lint-ignore no-explicit-any
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return fail("BAD_JSON", "AIの結果を読み取れませんでした(出力が途中で切れた可能性があります)。もう一度お試しください");
+  }
+
+  // --- 後処理:マスタ照合・単位チェック(AIの返事を鵜呑みにしない) ---
+  const byName = new Map<string, MasterRow>();
+  for (const m of masters) byName.set(norm(m.ingredient_name), m);
+
+  const warnings: string[] = Array.isArray(parsed.warnings) ? [...parsed.warnings] : [];
+
+  const steps = (Array.isArray(parsed.steps) ? parsed.steps : []).map(
+    // deno-lint-ignore no-explicit-any
+    (s: any, i: number) => ({
+      step_number: Number.isInteger(s.step_number) ? s.step_number : i + 1,
+      step_name: String(s.step_name ?? ""),
+      description: cleanBrackets(s.description),
+      tip: s.tip ? cleanBrackets(s.tip) : null,
+    }),
+  );
+  const stepNumbers = new Set(steps.map((s: { step_number: number }) => s.step_number));
+
+  const ingredients = (Array.isArray(parsed.ingredients) ? parsed.ingredients : []).map(
+    // deno-lint-ignore no-explicit-any
+    (ing: any, i: number) => {
+      const name = String(ing.ingredient_name ?? "").trim();
+      const quantity = String(ing.quantity ?? "").normalize("NFKC").trim();
+      const unit = normUnit(String(ing.unit ?? ""));
+
+      // マスタ照合:AIが選んだ名前 → 無ければ材料名そのもの
+      let master: MasterRow | undefined;
+      if (ing.master_name) master = byName.get(norm(String(ing.master_name)));
+      if (!master && name) master = byName.get(norm(name));
+
+      const availableUnits = master
+        ? ["g", ...(master.ingredient_units ?? []).map((u) => u.unit).filter((u) => u !== "g")]
+        : [];
+
+      const isSkip = SKIP_QTY.some((w) => quantity.includes(w)) || quantity === "";
+      let status: "ok" | "skip" | "no_master" | "unit_unknown" | "qty_unknown" = "ok";
+      if (isSkip) status = "skip";
+      else if (!master) status = "no_master";
+      else if (!isNumericQty(quantity)) status = "qty_unknown";
+      else if (!availableUnits.map(normUnit).includes(unit)) status = "unit_unknown";
+
+      const stepNo = Number.isInteger(ing.step_number) && stepNumbers.has(ing.step_number)
+        ? ing.step_number
+        : null;
+      const group = typeof ing.group_label === "string" && /^[A-Z]$/.test(ing.group_label.trim())
+        ? ing.group_label.trim()
+        : null;
+
+      return {
+        sort_order: i,
+        ingredient_name: master ? master.ingredient_name : name,
+        ingredient_master_id: master ? master.id : null,
+        quantity,
+        unit,
+        preparation: ing.preparation ? String(ing.preparation) : null,
+        step_number: stepNo,
+        group_label: group,
+        status,
+        available_units: availableUnits,
+      };
+    },
+  );
+
+  const countOf = (s: string) =>
+    ingredients.filter((x: { status: string }) => x.status === s).length;
+  const noMaster = countOf("no_master");
+  const unitUnknown = countOf("unit_unknown");
+  const qtyUnknown = countOf("qty_unknown");
+  if (noMaster > 0) warnings.push(`材料マスタに無い材料が${noMaster}件あります(このまま保存すると「未計算」になります)`);
+  if (unitUnknown > 0) warnings.push(`単位がマスタの単位表に無い材料が${unitUnknown}件あります(単位を選び直してください)`);
+  if (qtyUnknown > 0) warnings.push(`分量が数値でない材料が${qtyUnknown}件あります(「未計算」になります)`);
+  if (ingredients.length === 0) warnings.push("材料が1件も読み取れませんでした");
+  if (steps.length === 0) warnings.push("作り方が1件も読み取れませんでした");
+
+  const recipe = {
+    dish_name: String(parsed.dish_name ?? "").trim(),
+    source_name: parsed.source_name ? String(parsed.source_name).trim() : null,
+    genre: (GENRES as readonly string[]).includes(parsed.genre) ? parsed.genre : "その他",
+    category: (CATEGORIES as readonly string[]).includes(parsed.category) ? parsed.category : "主菜",
+    servings: Number.isInteger(parsed.servings) && parsed.servings > 0 ? parsed.servings : 2,
+    cooking_time_minutes: Number.isInteger(parsed.cooking_time_minutes) ? parsed.cooking_time_minutes : null,
+    registration_method: "ai",
+    steps,
+    ingredients,
+  };
+
+  return json({
+    ok: true,
+    recipe,
+    warnings,
+    summary: {
+      ingredient_count: ingredients.length,
+      no_master: noMaster,
+      unit_unknown: unitUnknown,
+      qty_unknown: qtyUnknown,
+      step_count: steps.length,
+    },
+  });
+});
+
+===== supabase\functions\gemini-key\index.ts =====
+// supabase/functions/gemini-key/index.ts
+// 自分のGemini APIキーを「確認・登録・削除」する。
+// キーそのものは絶対に返さない(登録済みかどうかだけ返す)。
+//   POST { action: "status" }                → { ok, has_key }
+//   POST { action: "save", api_key: "..." }  → キーを検証してから保存
+//   POST { action: "delete" }                → 削除
+
+import { createClient } from "npm:@supabase/supabase-js@2";
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...CORS, "Content-Type": "application/json" },
+  });
+}
+const fail = (code: string, message: string) => json({ ok: false, code, message });
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  if (req.method !== "POST") return json({ ok: false, code: "METHOD", message: "POSTで呼んでください" }, 405);
+
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader) return json({ ok: false, code: "UNAUTHORIZED", message: "ログインが必要です" }, 401);
+
+  const url = Deno.env.get("SUPABASE_URL")!;
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!serviceKey) return fail("NOT_CONFIGURED", "サーバーの設定が不足しています");
+
+  // 呼んだ人の確認
+  const userClient = createClient(url, Deno.env.get("SUPABASE_ANON_KEY")!, {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: userData, error: userErr } = await userClient.auth.getUser();
+  if (userErr || !userData?.user) {
+    return json({ ok: false, code: "UNAUTHORIZED", message: "ログインが無効です" }, 401);
+  }
+  const userId = userData.user.id;
+
+  // 家庭メンバーだけが使える(RLSで自分の所属が見えるかで判定)
+  const { data: member, error: memErr } = await userClient
+    .from("household_members")
+    .select("household_id")
+    .eq("user_id", userId)
+    .limit(1);
+  if (memErr || !member || member.length === 0) {
+    return json({ ok: false, code: "FORBIDDEN", message: "この家庭のメンバーではありません" }, 403);
+  }
+
+  const admin = createClient(url, serviceKey);
+
+  let body: { action?: string; api_key?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return fail("BAD_REQUEST", "リクエストの形式が正しくありません");
+  }
+
+  if (body.action === "status") {
+    const { data, error } = await admin
+      .from("user_gemini_keys")
+      .select("user_id")
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (error) return fail("DB_ERROR", error.message);
+    return json({ ok: true, has_key: !!data });
+  }
+
+  if (body.action === "delete") {
+    const { error } = await admin.from("user_gemini_keys").delete().eq("user_id", userId);
+    if (error) return fail("DB_ERROR", error.message);
+    return json({ ok: true, has_key: false });
+  }
+
+  if (body.action === "save") {
+    const key = (body.api_key ?? "").trim();
+    // 形のざっくりチェック(貼り付けミス・全角・改行の混入を防ぐ)。
+    // キーには英数字・_・-・. が使われる(新形式の「AQ.」で始まるキーは . を含む)
+    if (!/^[A-Za-z0-9_.\-]{20,200}$/.test(key)) {
+      return fail("BAD_KEY_FORMAT", "キーの形式が正しくありません。コピーし直してください(前後の空白・改行・全角は入れないでください)");
+    }
+
+    // 保存前に、実際にGeminiで使えるかを軽く確認(モデル一覧の取得。生成はしないので枠をほぼ使わない)
+    let check: Response;
+    try {
+      check = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", {
+        headers: { "x-goog-api-key": key },
+      });
+    } catch (e) {
+      return fail("NETWORK", `Googleに接続できませんでした: ${(e as Error).message}`);
+    }
+    if (check.status === 400 || check.status === 401 || check.status === 403) {
+      return fail("BAD_API_KEY", "このキーはGeminiで使えませんでした。AI Studioで作ったキーか確認してください");
+    }
+    if (!check.ok && check.status !== 429) {
+      return fail("CHECK_FAILED", `キーの確認に失敗しました(${check.status})。少し待ってからもう一度お試しください`);
+    }
+
+    const { error } = await admin
+      .from("user_gemini_keys")
+      .upsert({ user_id: userId, api_key: key, updated_at: new Date().toISOString() });
+    if (error) return fail("DB_ERROR", error.message);
+    return json({ ok: true, has_key: true });
+  }
+
+  return fail("BAD_ACTION", "action は status / save / delete のどれかです");
+});
+
