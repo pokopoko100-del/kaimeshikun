@@ -1,10 +1,13 @@
-// src/components/ImportPreviewEditor.tsx（新規作成）
+// src/components/ImportPreviewEditor.tsx（ファイル全体。これで丸ごと置き換えてください）
 // レシピ取り込みの「確認・修正」画面の中身。AIが読み取った内容を、保存する前に直せる
-//   ・基本情報（料理名・参考元・ジャンル…）／材料／作り方
+//   ・料理写真（表示用）／基本情報（料理名・参考元・ジャンル…）／材料／作り方
 //   ・材料ごとに「未計算になるか」を、材料マスタと照らして、その場で表示する
 //     （マスタに無い・単位が合わない・分量が数値でない、のどれか）
 //   ・保存ボタンは、画面上部の固定帯（RecipeImportPage）と、この画面の一番下にある
-import { useMemo } from 'react'
+// 今回の変更：
+//   ・「料理の写真（表示用）」の欄を追加（AIに読み取らせた写真とは別に、一覧・詳細に表示する写真を選べる）
+//   ・調理時間をAIが推定したときは、その旨を表示（自分で直すと、推定の表示は消える）
+import { useMemo, useRef } from 'react'
 import type { ReactNode } from 'react'
 import type { Draft, DraftIngredient, DraftStep, MasterOption } from '../lib/recipeImport'
 import {
@@ -55,6 +58,12 @@ type Props = {
   saving: boolean
   error: string | null
   onSave: () => void
+  // 料理写真（表示用）
+  photoUrl: string | null
+  photoBusy: boolean
+  photoError: string | null
+  onPickPhoto: (file: File) => void
+  onClearPhoto: () => void
 }
 
 export default function ImportPreviewEditor({
@@ -66,7 +75,13 @@ export default function ImportPreviewEditor({
   saving,
   error,
   onSave,
+  photoUrl,
+  photoBusy,
+  photoError,
+  onPickPhoto,
+  onClearPhoto,
 }: Props) {
+  const photoInput = useRef<HTMLInputElement>(null)
   const masterMap = useMemo(() => new Map(masters.map((m) => [m.id, m])), [masters])
 
   // 材料マスタを、カテゴリごとにまとめる（選択肢の並び用）
@@ -112,6 +127,52 @@ export default function ImportPreviewEditor({
           </ul>
         </div>
       )}
+
+      {/* 料理写真（表示用） */}
+      <Card title="料理の写真（表示用・任意）">
+        <p className="mb-2 text-[11px] leading-relaxed text-gray-400">
+          レシピ一覧・詳細に表示される写真です。AIに読み取らせた写真（料理本のページなど）とは別に選べます。あとから、詳細画面でも変更できます。
+        </p>
+        <input
+          ref={photoInput}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (photoInput.current) photoInput.current.value = '' // 同じ写真をもう一度選べるように
+            if (f) onPickPhoto(f)
+          }}
+        />
+        <div className="relative aspect-video overflow-hidden rounded-lg bg-gray-100">
+          {photoUrl ? (
+            <img src={photoUrl} alt="料理の写真" className="h-full w-full object-cover" />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center text-4xl text-gray-300">🍽️</div>
+          )}
+          <div className="absolute bottom-2 right-2 flex gap-1.5">
+            {photoUrl && (
+              <button
+                type="button"
+                onClick={onClearPhoto}
+                disabled={photoBusy}
+                className="rounded-full bg-black/60 px-3 py-1.5 text-xs font-bold text-white active:opacity-80 disabled:opacity-50"
+              >
+                取り除く
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => photoInput.current?.click()}
+              disabled={photoBusy}
+              className="rounded-full bg-black/60 px-3 py-1.5 text-xs font-bold text-white active:opacity-80 disabled:opacity-50"
+            >
+              {photoBusy ? '変換中…' : photoUrl ? '📷 変更' : '📷 登録'}
+            </button>
+          </div>
+        </div>
+        {photoError && <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{photoError}</p>}
+      </Card>
 
       {/* 基本情報 */}
       <Card title="基本情報">
@@ -187,10 +248,15 @@ export default function ImportPreviewEditor({
                 value={draft.cookingTime}
                 inputMode="numeric"
                 placeholder="わからなければ空欄"
-                onChange={(e) => set({ cookingTime: e.target.value })}
+                onChange={(e) => set({ cookingTime: e.target.value, cookingTimeEstimated: false })}
               />
             </Field>
           </div>
+          {draft.cookingTimeEstimated && (
+            <p className="-mt-1 rounded-lg bg-amber-50 px-3 py-1.5 text-[11px] text-amber-800">
+              ✨ 調理時間は、AIが材料と工程から推定した目安です（直すと、この表示は消えます）。
+            </p>
+          )}
         </div>
       </Card>
 
@@ -204,7 +270,7 @@ export default function ImportPreviewEditor({
           >
             {unresolved === 0
               ? '✅ すべての材料が、カロリー・費用の計算に使えます。'
-              : `⚠️ ${unresolved}件が「未計算」になります。材料マスタを選び直すか、単位を直してください。単位がマスタに無いときは、保存したあとで材料マスタ画面から追加できます。`}
+              : `⚠️ ${unresolved}件が「未計算」になります。材料マスタを選び直すか、単位を直してください。`}
           </p>
         ) : (
           <p className="mb-2 rounded-lg bg-gray-100 px-3 py-2 text-xs text-gray-500">

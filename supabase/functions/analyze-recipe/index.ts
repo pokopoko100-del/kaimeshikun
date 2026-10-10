@@ -3,6 +3,7 @@
 // 必要なSecrets: GEMINI_MODEL(モデル名。全員共通)
 // APIキーは「呼んだ人」ごとに user_gemini_keys テーブルから読む(各自が自分のキーを登録)。
 // SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY は Supabase が自動で渡す。
+// 今回の変更：調理時間が書かれていないときは、材料と工程からAIが推定する(cooking_time_estimated=true で返す)
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
@@ -25,9 +26,10 @@ const CATEGORIES = [
 
 const MAX_TEXT_CHARS = 20000;
 const MAX_IMAGES = 4;
-const MAX_IMAGE_BASE64_CHARS = 5_000_000; // 約3.7MB。端末側で1280px/JPEG80%に圧縮済みの想定
+const MAX_IMAGE_BASE64_CHARS = 5_000_000; // 約3.7MB。端末側で長辺1600px/JPEG80%に圧縮済みの想定
 const ALLOWED_MIME = ["image/jpeg", "image/png", "image/webp"];
 const SKIP_QTY = ["少々", "適量", "適宜", "ひとつまみ", "少量", "お好みで", "お好み"];
+const MAX_COOKING_MINUTES = 1440;
 
 type MasterRow = {
   id: string;
@@ -81,6 +83,7 @@ const responseSchema = {
     category: { type: "STRING", enum: [...CATEGORIES] },
     servings: { type: "INTEGER" },
     cooking_time_minutes: { type: "INTEGER", nullable: true },
+    cooking_time_estimated: { type: "BOOLEAN" },
     steps: {
       type: "ARRAY",
       items: {
@@ -128,13 +131,18 @@ function buildSystemPrompt(masterLines: string): string {
 入力(画像またはテキスト)に書かれたレシピを、指定のJSONスキーマで出力してください。
 
 # 基本ルール
-- 入力に書かれていない情報を作らない。読み取れない・書かれていない項目は null か空にし、warnings に理由を書く。
+- 入力に書かれていない情報を作らない(調理時間だけは、下の「調理時間」のとおり推定してよい)。読み取れない・書かれていない項目は null か空にし、warnings に理由を書く。
 - 文章は原文の言葉をできるだけそのまま使う。言い換えたり、材料名を勝手に詳しくしたりしない(例:原文が「油」なら「油」のまま。「サラダ油」にしない)。
 - dish_name は料理名のみ(「簡単!」などの装飾は除く)。
 - servings は入力に書かれた人数(○人前・○人分)をそのまま整数で。換算しない。書かれていなければ 2 にして warnings に書く。
 - genre は ${GENRES.join(" / ")} から1つ。category は ${CATEGORIES.join(" / ")} から1つ。
 - source_name は、投稿者・著者・店名など作った人が分かるときだけ。分からなければ null。
-- cooking_time_minutes は料理全体の調理時間が書かれているときだけ整数で。無ければ null。
+
+# 調理時間
+- cooking_time_minutes は、料理全体の調理時間(分)を整数で。
+- 入力に調理時間が書かれていれば、その値を入れ、cooking_time_estimated は false。
+- 書かれていなければ、材料と工程から推定した目安を入れ、cooking_time_estimated を true にする。下ごしらえから完成までに、実際にかかる時間(加熱・炒める・煮込むなどの時間を含む)で、5分単位にする。冷蔵庫での寝かせ・漬け込み・冷やし固めなど、長い待ち時間は含めない。
+- 工程が全く読み取れず、推定できないときだけ null(cooking_time_estimated は false)。
 
 # 材料
 - ingredient_name は入力に書かれた名前。master_name は下の「材料マスタ」の名前と完全一致するものがあるときだけ入れる。似ているだけ・無いときは null(無理に合わせない)。
@@ -153,6 +161,7 @@ function buildSystemPrompt(masterLines: string): string {
 
 # warnings
 - 画像が不鮮明、分量が読めない、人数が不明、範囲を中間値にした、などユーザーが確認すべき点を日本語の短い文で。
+- 調理時間の推定については、こちらで注意を足すので、書かなくてよい。
 
 # 材料マスタ(「材料名 | 使える単位」)
 ${masterLines}`;
@@ -381,13 +390,26 @@ Deno.serve(async (req) => {
   if (ingredients.length === 0) warnings.push("材料が1件も読み取れませんでした");
   if (steps.length === 0) warnings.push("作り方が1件も読み取れませんでした");
 
+  // 調理時間：整数の分にそろえる。範囲外は無かったことにする
+  const timeRaw = Number(parsed.cooking_time_minutes);
+  const cookingTime =
+    parsed.cooking_time_minutes !== null && Number.isFinite(timeRaw) && Math.round(timeRaw) >= 1 &&
+      Math.round(timeRaw) <= MAX_COOKING_MINUTES
+      ? Math.round(timeRaw)
+      : null;
+  const cookingEstimated = cookingTime !== null && parsed.cooking_time_estimated === true;
+  if (cookingEstimated) {
+    warnings.push(`調理時間(約${cookingTime}分)は、AIが材料と工程から推定した目安です。実際に合わせて直してください`);
+  }
+
   const recipe = {
     dish_name: String(parsed.dish_name ?? "").trim(),
     source_name: parsed.source_name ? String(parsed.source_name).trim() : null,
     genre: (GENRES as readonly string[]).includes(parsed.genre) ? parsed.genre : "その他",
     category: (CATEGORIES as readonly string[]).includes(parsed.category) ? parsed.category : "主菜",
     servings: Number.isInteger(parsed.servings) && parsed.servings > 0 ? parsed.servings : 2,
-    cooking_time_minutes: Number.isInteger(parsed.cooking_time_minutes) ? parsed.cooking_time_minutes : null,
+    cooking_time_minutes: cookingTime,
+    cooking_time_estimated: cookingEstimated,
     registration_method: "ai",
     steps,
     ingredients,

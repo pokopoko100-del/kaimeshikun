@@ -1,23 +1,25 @@
-
 // src/pages/RecipeDetailPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 前提：recipe_nutrition ビュー（01）、recipes.plan_confirmed 列（09）、cook_logs テーブル（11）を作成済みであること
 // 前提：12_ingredients_by_step.sql（steps.tip / ingredients.step_id / ingredients.group_label）を実行済みであること
 // 前提：ingredient_units テーブル（複数単位の対応）を作成済みであること
+// 前提：src/lib/recipePhoto.ts と src/lib/ingredientOrder.ts を置いてあること（今回の追加ファイル）
 // 今回の変更：
+//  ・写真の右下に「📷 登録／変更」ボタンを追加。選んだ写真は端末で縮めてから保存し、古い写真は消す
+//  ・「材料」表を、買い物リストのカテゴリ順（設定画面の順）に並べ替えた
+//      カテゴリ名は出さず、カテゴリが変わるところの線だけ濃くした。A・Bなどのグループ分けと、下ごしらえ（括弧書き）は、この表では出さない
+//      （「作り方」の各工程に出る材料は、これまでどおり。グループ記号・下ごしらえも出る）
+// これまでの内容：
 //  ・一番上に固定の帯（スクロールしても動かない）
 //      1行目：左＝「← 戻る」／右＝「追加」「履歴（回数つき）」「栄養素」ボタン
 //      2行目：料理名。その下に小さく「参照元・時間・カロリー・費用」
-//  ・「履歴」「栄養素」は、ボタンを押すと下から出る画面で表示（これまで本文に並んでいた内容を移動）
+//  ・「履歴」「栄養素」は、ボタンを押すと下から出る画面で表示
 //  ・「追加」は献立候補の追加／外す。押したあとに「元に戻す」付きのメッセージを表示
-//  ・材料は、新しい形式（工程ごとに材料が紐付いたレシピ）でも、まず全部の材料を「材料」表にまとめて表示
-//    その下の「作り方」に、各工程で使う材料 ＋ 作り方を表示（古い形式のレシピは、作り方のみ）
-//  ・人数切替（－ ○人前 ＋）は「材料」の見出しの右に移動（カロリー・費用・分量が連動。一覧・献立と共通の設定）
-// これまでの内容：
-//  ・材料のグループ記号（A・B…）をオレンジの丸バッジで表示。工程の本文中の [A] もバッジにする
+//  ・人数切替（－ ○人前 ＋）は「材料」の見出しの右（カロリー・費用・分量が連動。一覧・献立と共通の設定）
+//  ・材料のグループ記号（A・B…）をオレンジの丸バッジで表示（作り方の工程内）。工程の本文中の [A] もバッジにする
 //  ・カロリー／費用／栄養素は recipe_nutrition ビュー（材料マスタから計算）から表示
 //  ・計算できていない材料には「未計算」マーク（判定は材料マスタの単位表 ingredient_units に合わせてある）
 //  ・分量は「大さじ3」のように、大さじ・小さじは単位を先頭に表示
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../supabaseClient'
@@ -29,10 +31,17 @@ import { NUTRIENT_INFO_LIST } from '../data/nutrientInfo'
 import type { NutrientInfo } from '../data/nutrientInfo'
 import ServingsStepper from '../components/ServingsStepper'
 import { useServings } from '../lib/useServings'
+import { normalizeCategoryOrder } from '../lib/categoryOrder'
+import { fetchCategoryOrder, getHouseholdId } from '../lib/household'
+import { orderByCategory } from '../lib/ingredientOrder'
+import type { OrderedRow } from '../lib/ingredientOrder'
+import { compressForDisplay, replaceRecipePhoto } from '../lib/recipePhoto'
+import { errorText } from '../lib/errorText'
 
-// 材料 ＋ 紐付いたマスタの単位情報（未計算の判定に使う）
+// 材料 ＋ 紐付いたマスタの情報（カテゴリ順の並びと、未計算の判定に使う）
 type IngredientRow = Ingredient & {
   ingredient_master: {
+    category: string | null
     default_unit: string | null
     unit_weight_g: number | null
     ingredient_units?: { unit: string; weight_g: number }[] | null
@@ -57,7 +66,6 @@ type Toast = { message: string; onUndo: () => void }
 const LOG_PREVIEW = 10 // 作った履歴は、最初は新しい順に10件だけ表示
 
 // ---------- 計算ルール（SQLビュー 01_recipe_nutrition_view.sql と同じ） ----------
-
 // 分量(text)を数値に変換："2" "0.5" "1/2" に対応。それ以外は null
 function parseQty(t: string | null): number | null {
   if (t == null) return null
@@ -87,7 +95,6 @@ function isResolved(ing: IngredientRow): boolean {
 }
 
 // ---------- 表示用ヘルパー ----------
-
 // 分量の表示：「大さじ」「小さじ」は単位が先頭（大さじ3）、それ以外は数量が先頭（300g・2個）
 function formatAmount(quantity: string | null, unit: string | null): string {
   const q = quantity ?? ''
@@ -142,7 +149,7 @@ function buildBlocks(list: IngredientRow[]): IngBlock[] {
   for (const ing of list) {
     const label = ing.group_label
     if (label) {
-      // 同じ記号でも、別の工程の材料はまとめない（全材料の表でも、工程ごとのA・Bが混ざらないように）
+      // 同じ記号でも、別の工程の材料はまとめない（工程ごとのA・Bが混ざらないように）
       const found = blocks.find((b) => b.label === label && b.stepId === ing.step_id)
       if (found) {
         found.items.push(ing)
@@ -176,6 +183,7 @@ export default function RecipeDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { session } = useOutletContext<{ session: Session }>()
+  const photoInput = useRef<HTMLInputElement>(null)
 
   const [recipe, setRecipe] = useState<Recipe | null>(null)
   const [ingredients, setIngredients] = useState<IngredientRow[]>([])
@@ -190,8 +198,9 @@ export default function RecipeDetailPage() {
   const [togglingPlanned, setTogglingPlanned] = useState(false)
   const [sheet, setSheet] = useState<'history' | 'nutrition' | null>(null) // 下から出る画面（履歴／栄養素）
   const [toast, setToast] = useState<Toast | null>(null)
+  const [photoBusy, setPhotoBusy] = useState(false) // 料理写真を保存している途中
+  const [categoryOrder, setCategoryOrder] = useState<string[]>(normalizeCategoryOrder(null)) // 買い物リストのカテゴリ順
   const [servings, setServings] = useServings() // 何人前で表示するか（共通設定）
-
   const imageUrl = useRecipeImage(recipe?.image_path ?? null)
 
   // 「元に戻す」メッセージは4秒で自動的に消す
@@ -200,6 +209,23 @@ export default function RecipeDetailPage() {
     const t = setTimeout(() => setToast(null), 4000)
     return () => clearTimeout(t)
   }, [toast])
+
+  // 買い物リストのカテゴリ順（設定画面の順）。読めなくても、初期の順で表示する
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const householdId = await getHouseholdId(session.user.id)
+        const order = await fetchCategoryOrder(householdId)
+        if (!cancelled) setCategoryOrder(order)
+      } catch (e) {
+        console.error(e)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [session.user.id])
 
   useEffect(() => {
     if (!id) return
@@ -213,7 +239,7 @@ export default function RecipeDetailPage() {
         supabase.from('recipes').select('*').eq('id', id).single(),
         supabase
           .from('ingredients')
-          .select('*, ingredient_master(default_unit, unit_weight_g, ingredient_units(unit, weight_g))')
+          .select('*, ingredient_master(category, default_unit, unit_weight_g, ingredient_units(unit, weight_g))')
           .eq('recipe_id', id)
           .order('sort_order'),
         supabase.from('steps').select('*').eq('recipe_id', id).order('step_number'),
@@ -233,7 +259,6 @@ export default function RecipeDetailPage() {
         setLoading(false)
         return
       }
-
       setRecipe(recipeResult.data as Recipe)
 
       // 材料：マスタ結合つきの取得に失敗したときは、結合なしで取り直す（表示は止めない）
@@ -268,6 +293,7 @@ export default function RecipeDetailPage() {
       } else {
         setCookLogs((logsResult.data ?? []) as CookLog[])
       }
+
       setLoading(false)
     }
 
@@ -317,6 +343,28 @@ export default function RecipeDetailPage() {
     })
   }
 
+  // 料理写真の登録・変更：端末で縮める → 保存 → レシピの写真を差し替え → 古い写真を消す
+  const handlePickPhoto = async (file: File) => {
+    if (!recipe || photoBusy) return
+    setPhotoBusy(true)
+    try {
+      const blob = await compressForDisplay(file)
+      const newPath = await replaceRecipePhoto({
+        householdId: recipe.household_id,
+        recipeId: recipe.id,
+        oldPath: recipe.image_path,
+        blob,
+        userId: session.user.id,
+      })
+      setRecipe((r) => (r ? { ...r, image_path: newPath } : r))
+    } catch (e) {
+      console.error(e)
+      alert('写真の保存に失敗しました：' + errorText(e))
+    } finally {
+      setPhotoBusy(false)
+    }
+  }
+
   // 未計算の材料（分量が「適量」などのものは数えない）
   const unresolvedSet = useMemo(() => {
     const s = new Set<string>()
@@ -347,6 +395,18 @@ export default function RecipeDetailPage() {
     }
     return byStep
   }, [ingredients, steps])
+
+  // 「材料」表：買い物リストのカテゴリ順に並べる（同じカテゴリの中は、レシピに書かれた順）
+  const orderedIngredients = useMemo(
+    () =>
+      orderByCategory(
+        ingredients,
+        categoryOrder,
+        (ing) => ing.ingredient_master?.category,
+        (ing) => ing.sort_order,
+      ),
+    [ingredients, categoryOrder],
+  )
 
   if (loading) {
     return (
@@ -455,13 +515,33 @@ export default function RecipeDetailPage() {
         </p>
       </header>
 
-      {/* 写真 */}
-      <div className="w-full h-56 bg-gray-100 flex items-center justify-center">
+      {/* 写真（右下の「登録／変更」ボタンで、写真を選び直せる） */}
+      <div className="relative flex h-56 w-full items-center justify-center bg-gray-100">
         {imageUrl ? (
-          <img src={imageUrl} alt={recipe.dish_name} className="w-full h-full object-cover" />
+          <img src={imageUrl} alt={recipe.dish_name} className="h-full w-full object-cover" />
         ) : (
           <span className="text-5xl">🍚</span>
         )}
+        <input
+          ref={photoInput}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (photoInput.current) photoInput.current.value = '' // 同じ写真をもう一度選べるように
+            if (f) void handlePickPhoto(f)
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => photoInput.current?.click()}
+          disabled={photoBusy}
+          aria-label={recipe.image_path ? '写真を変更する' : '写真を登録する'}
+          className="absolute bottom-2 right-2 rounded-full bg-black/60 px-3 py-1.5 text-xs font-bold text-white active:opacity-80 disabled:opacity-60"
+        >
+          {photoBusy ? '保存中…' : recipe.image_path ? '📷 変更' : '📷 登録'}
+        </button>
       </div>
 
       <div className="p-4">
@@ -473,7 +553,7 @@ export default function RecipeDetailPage() {
           </p>
         )}
 
-        {/* 材料表（新しい形式のレシピでも、まず全部の材料をここにまとめて表示） */}
+        {/* 材料表（買い物リストのカテゴリ順。カテゴリ名は出さず、カテゴリが変わるところの線だけ濃くする） */}
         <section className="mt-3">
           <div className="mb-2 flex items-center justify-between gap-2">
             <h2 className="font-semibold text-gray-800">
@@ -488,7 +568,7 @@ export default function RecipeDetailPage() {
             <p className="text-sm text-gray-400">材料情報はありません。</p>
           ) : (
             <div className="rounded-xl bg-white px-4 py-1 shadow-sm">
-              <StepIngredients list={ingredients} factor={factor} unresolvedSet={unresolvedSet} />
+              <IngredientTable rows={orderedIngredients} factor={factor} unresolvedSet={unresolvedSet} />
             </div>
           )}
         </section>
@@ -680,8 +760,42 @@ function NutrientLine({ label, value, indent }: { label: string; value: string; 
   )
 }
 
-// ---------- 工程ごとの表示部品 ----------
+// ---------- 材料表（買い物リストのカテゴリ順） ----------
+// カテゴリ名は出さない。1つ前の行とカテゴリが違う行の上の線だけ、濃くする。グループ記号・下ごしらえ（括弧書き）も出さない
+function IngredientTable({
+  rows,
+  factor,
+  unresolvedSet,
+}: {
+  rows: OrderedRow<IngredientRow>[]
+  factor: number
+  unresolvedSet: Set<string>
+}) {
+  return (
+    <ul>
+      {rows.map(({ item: ing, startsGroup }, i) => (
+        <li
+          key={ing.id}
+          className={`flex justify-between gap-2 py-1.5 text-sm ${
+            i === 0 ? '' : startsGroup ? 'border-t border-gray-400' : 'border-t border-gray-100'
+          }`}
+        >
+          <span className="min-w-0 text-gray-700">
+            {ing.ingredient_name}
+            {unresolvedSet.has(ing.id) && (
+              <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                未計算
+              </span>
+            )}
+          </span>
+          <span className="shrink-0 text-gray-500">{formatAmount(scaleQuantity(ing.quantity, factor), ing.unit)}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
 
+// ---------- 工程ごとの表示部品 ----------
 // グループ記号（A・B…）のオレンジの丸バッジ
 function GroupBadge({ label, small }: { label: string; small?: boolean }) {
   return (

@@ -1,11 +1,18 @@
-// src/lib/recipeImport.ts（新規作成）
-// レシピ取り込み（テキスト・写真 → AIで読み取り → 確認・修正 → 保存）の共通部品
+// src/lib/recipeImport.ts（ファイル全体。これで丸ごと置き換えてください）
+// レシピ取り込み（テキスト・写真 → AIで読み取り → 材料の登録 → 確認・修正 → 保存）の共通部品
 //   ・AIの解析は Supabase の関数 analyze-recipe（自分のGeminiキーで動く）。この関数は「読み取るだけ」で保存はしない
 //   ・保存は、この画面から recipes → steps → ingredients の順に行う（途中で失敗したら、作りかけのレシピを消して元に戻す）
 //   ・「未計算になるか」の判定は、レシピ詳細・サーバー側の関数（recipe_nutrition ビュー）と同じルール
+// 今回の変更：
+//   ・調理時間をAIが推定したときのフラグ（cookingTimeEstimated）を追加
+//   ・保存のときに、料理写真（表示用）も一緒に保存できるようにした（saveDraft の3つ目の引数）
+//   ・関数の呼び出しを callFunction にまとめた／写真を縮める処理は recipePhoto に移した
 import { supabase } from '../supabaseClient'
+import { callFunction } from './callFunction'
+import type { CallFailure } from './callFunction'
 import { errorText } from './errorText'
 import { getHouseholdId } from './household'
+import { loadImage, replaceRecipePhoto } from './recipePhoto'
 
 // ---------- 選択肢（DBの値と同じ） ----------
 export const GENRES = ['和食', '洋食', '中華', 'エスニック', 'その他'] as const
@@ -42,6 +49,7 @@ export type Draft = {
   category: string
   servings: string
   cookingTime: string
+  cookingTimeEstimated: boolean // AIが推定した調理時間か（直すと false になる）
   steps: DraftStep[]
   ingredients: DraftIngredient[]
 }
@@ -53,9 +61,7 @@ export type AnalyzeInput = {
   text: string
   images: { mime: string; data: string }[]
 }
-export type AnalyzeResult =
-  | { ok: true; draft: Draft; warnings: string[] }
-  | { ok: false; code: string | null; message: string }
+export type AnalyzeResult = { ok: true; draft: Draft; warnings: string[] } | CallFailure
 
 let seq = 0
 export const newKey = () => `k${++seq}`
@@ -63,6 +69,18 @@ export const newKey = () => `k${++seq}`
 // ① ② ③ … の丸数字（20まで。それ以上は「21.」）
 export function circled(n: number): string {
   return n >= 1 && n <= 20 ? String.fromCodePoint(0x2460 + n - 1) : `${n}.`
+}
+
+// 名前の比較用（全角半角・空白・大文字小文字をそろえる）
+export function normName(s: string): string {
+  return (s ?? '').normalize('NFKC').replace(/\s+/g, '').toLowerCase()
+}
+
+// 分量の表記（大さじ・小さじは単位を先頭に：大さじ2／それ以外は数量を先頭に：300g）
+export function fmtUsage(quantity: string, unit: string): string {
+  const q = quantity.trim()
+  const u = unit.trim()
+  return u === '大さじ' || u === '小さじ' ? `${u}${q}` : `${q}${u}`
 }
 
 // ---------- 未計算の判定（サーバー側・詳細画面と同じルール） ----------
@@ -142,16 +160,13 @@ type ServerRecipe = {
   category: string
   servings: number
   cooking_time_minutes: number | null
+  cooking_time_estimated?: boolean
   steps: ServerStep[]
   ingredients: ServerIngredient[]
 }
-type ServerResponse = {
-  ok?: boolean
-  code?: string
-  message?: string
-  recipe?: ServerRecipe
-  warnings?: string[]
-}
+
+// 材料の登録（次の画面）で解決するので、確認画面では出さない注意
+const STALE_WARNING = /材料マスタに無い材料が|単位がマスタの単位表に無い材料が/
 
 function toDraft(r: ServerRecipe): Draft {
   // 工程は 1,2,3… に振り直し、材料の「使う工程」も同じ番号に直す
@@ -159,6 +174,7 @@ function toDraft(r: ServerRecipe): Draft {
   const noMap = new Map<number, number>()
   sorted.forEach((s, i) => noMap.set(s.step_number, i + 1))
 
+  const hasTime = r.cooking_time_minutes != null
   return {
     dishName: r.dish_name ?? '',
     sourceName: r.source_name ?? '',
@@ -167,7 +183,8 @@ function toDraft(r: ServerRecipe): Draft {
     genre: r.genre,
     category: r.category,
     servings: String(r.servings ?? 2),
-    cookingTime: r.cooking_time_minutes != null ? String(r.cooking_time_minutes) : '',
+    cookingTime: hasTime ? String(r.cooking_time_minutes) : '',
+    cookingTimeEstimated: hasTime && r.cooking_time_estimated === true,
     steps: sorted.map((s) => ({
       key: newKey(),
       name: s.step_name ?? '',
@@ -188,46 +205,17 @@ function toDraft(r: ServerRecipe): Draft {
 }
 
 export async function analyzeRecipe(input: AnalyzeInput): Promise<AnalyzeResult> {
-  const { data, error } = await supabase.functions.invoke('analyze-recipe', { body: input })
-
-  if (error) {
-    // ログイン切れ（401）などは、本文に理由が入っている
-    const ctx = (error as { context?: unknown }).context
-    if (ctx instanceof Response) {
-      try {
-        const j = (await ctx.json()) as ServerResponse
-        if (typeof j.message === 'string') return { ok: false, code: j.code ?? null, message: j.message }
-      } catch {
-        /* 本文が読めなければ、下の文言を使う */
-      }
-    }
-    return { ok: false, code: null, message: '通信に失敗しました：' + errorText(error) }
+  const r = await callFunction<{ recipe?: ServerRecipe; warnings?: string[] }>('analyze-recipe', input)
+  if (!r.ok) return r
+  if (!r.recipe) return { ok: false, code: null, message: '読み取りに失敗しました' }
+  return {
+    ok: true,
+    draft: toDraft(r.recipe),
+    warnings: (r.warnings ?? []).filter((w) => !STALE_WARNING.test(w)),
   }
-
-  const r = data as ServerResponse | null
-  if (!r?.ok || !r.recipe) {
-    return { ok: false, code: r?.code ?? null, message: r?.message ?? '読み取りに失敗しました' }
-  }
-  return { ok: true, draft: toDraft(r.recipe), warnings: r.warnings ?? [] }
 }
 
-// ---------- 写真を、AIに送れる大きさに縮める ----------
-function loadImage(file: File): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file)
-    const img = new Image()
-    img.onload = () => {
-      URL.revokeObjectURL(url)
-      resolve(img)
-    }
-    img.onerror = () => {
-      URL.revokeObjectURL(url)
-      reject(new Error('この画像は読み込めませんでした（JPEG・PNG・WebPの写真を選んでください）'))
-    }
-    img.src = url
-  })
-}
-
+// ---------- 写真（AIに読み取らせる用）を、AIに送れる大きさに縮める ----------
 // 長辺1600px・JPEG品質80%。文字が読めるよう、設計書の1280pxより少し大きめにしてある
 export async function compressForAi(file: File, maxEdge = 1600, quality = 0.8): Promise<{ mime: string; data: string }> {
   if (!file.type.startsWith('image/')) throw new Error('画像ファイルを選んでください')
@@ -265,8 +253,10 @@ export function validateDraft(d: Draft): string | null {
   return null
 }
 
-// 保存して、新しいレシピのIDを返す
-export async function saveDraft(d: Draft, userId: string): Promise<string> {
+// 保存の結果。写真だけ失敗したときは、レシピは保存できているので photoError に理由を入れて返す
+export type SaveResult = { id: string; photoError: string | null }
+
+export async function saveDraft(d: Draft, userId: string, photo: Blob | null = null): Promise<SaveResult> {
   const msg = validateDraft(d)
   if (msg) throw new Error(msg)
 
@@ -362,5 +352,16 @@ export async function saveDraft(d: Draft, userId: string): Promise<string> {
     throw e
   }
 
-  return recipeId
+  // ④ 料理写真（表示用）。失敗しても、保存したレシピは消さない
+  let photoError: string | null = null
+  if (photo) {
+    try {
+      await replaceRecipePhoto({ householdId, recipeId, oldPath: null, blob: photo, userId })
+    } catch (e) {
+      console.error(e)
+      photoError = errorText(e)
+    }
+  }
+
+  return { id: recipeId, photoError }
 }
