@@ -1,5 +1,6 @@
 // src/pages/SettingsPage.tsx（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：「献立に追加したときの人数」（初期値）の設定を追加
+// 今回の変更：「家族と1食の目安」「主食」の設定を追加（献立に追加したときの人数は「家族」の中へ）
+// 前回の変更：「献立に追加したときの人数」（初期値）の設定を追加
 // 前回の変更：
 //  ・各項目を、タップで開閉するカードにした（最初は全部閉じている。買い物リストのカテゴリ順が場所をとっていたため）
 //  ・「FaceID / パスキー」の登録ボタンを追加（第16版の画面構成変更で消えていた分）
@@ -12,7 +13,8 @@ import SettingsSection from '../components/SettingsSection'
 import PasskeySettings from '../components/PasskeySettings'
 import GeminiKeySettings from '../components/GeminiKeySettings'
 import ShoppingCategoryOrderSettings from '../components/ShoppingCategoryOrderSettings'
-import DefaultPlanServingsSettings from '../components/DefaultPlanServingsSettings'
+import FamilySettings from '../components/FamilySettings'
+import StapleSettings from '../components/StapleSettings'
 
 export default function SettingsPage() {
   const { session } = useOutletContext<{ session: Session }>()
@@ -30,8 +32,12 @@ export default function SettingsPage() {
         <GeminiKeySettings />
       </SettingsSection>
 
-      <SettingsSection icon="🍽" title="献立に追加したときの人数" description="何人前つくるかの初期値（献立画面で、レシピごとに変えられる）">
-        <DefaultPlanServingsSettings />
+      <SettingsSection icon="👨‍👩‍👧" title="家族と1食の目安" description="体格から1日に必要なカロリーを計算（献立の人数・分析で使う）">
+        <FamilySettings />
+      </SettingsSection>
+
+      <SettingsSection icon="🍚" title="主食" description="献立の分析で足す、ごはん・パンなどと1人1食の量">
+        <StapleSettings />
       </SettingsSection>
 
       <SettingsSection icon="🛒" title="買い物リストのカテゴリ順" description="カテゴリの並び順を変える">

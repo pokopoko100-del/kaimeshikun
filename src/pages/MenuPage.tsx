@@ -1,5 +1,10 @@
 // src/pages/MenuPage.tsx（ファイル全体。これで丸ごと置き換えてください）
 // 今回の変更：
+//  ・一番上の「食事回数・1食平均」を、「📊 分析」ボタンに置き換えた（MenuAnalysisSheet）
+//      主食を足した1人1食のカロリー・値段を計算して上に表示。栄養の過不足と、AIの提案（選んだときだけ）
+//      結果は端末に保存し、確定の料理（購入済を含む）・人数・1人前の値が変わるまで残る
+//  前提：15_family_staples_migration.sql を実行済み（未実行でも、平均値・主食なしで分析できる）
+// 前回の変更：
 //  ・「確定(購入済)」を追加（14_menu_purchased_migration.sql）。確定した料理を買い物リストに追加すると、購入済に移る（確定より上に表示）
 //      【確定(購入済)】 → 右スワイプ：作った ／ ← 左スワイプ：確定に戻す・候補に戻す・削除 を選ぶ
 //      【確定】        → 右スワイプ：なし   ／ ← 左スワイプ：候補に戻す・削除 を選ぶ
@@ -28,6 +33,9 @@ import SwipeRow from '../components/SwipeRow'
 import type { SwipeAction } from '../components/SwipeRow'
 import ServingsStepper from '../components/ServingsStepper'
 import ShoppingAddSheet from '../components/ShoppingAddSheet'
+import MenuAnalysisSheet from '../components/MenuAnalysisSheet'
+import type { AnalysisResult, DishInput } from '../lib/menuAnalysis'
+import { fingerprint, loadSaved, saveResult } from '../lib/menuAnalysis'
 import { getHouseholdId } from '../lib/household'
 import { todayLocal } from '../lib/dates'
 import { errorText } from '../lib/errorText'
@@ -72,9 +80,6 @@ function plannedOf(r: Pick<Recipe, 'planned_servings' | 'servings'>): number {
   return r.planned_servings ?? Math.max(1, r.servings || 1)
 }
 
-// 「1回の食事」として数えるサブカテゴリ（主菜と、麺・丼・ワンプレート）
-const MEAL_CATEGORIES = ['主菜', '麺・丼・ワンプレート']
-
 function roundSmart(value: number): number {
   const abs = Math.abs(value)
   if (abs === 0) return 0
@@ -118,6 +123,8 @@ export default function MenuPage() {
   const [toast, setToast] = useState<Toast | null>(null)
   const [showAdd, setShowAdd] = useState(false) // 「買い物リストに追加」の確認画面
   const [choice, setChoice] = useState<MenuRow | null>(null) // 左スワイプで出す選択（戻す・削除）
+  const [showAnalysis, setShowAnalysis] = useState(false)
+  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null)
 
   const load = useCallback(async () => {
     const { data, error: recErr } = await supabase
@@ -364,50 +371,53 @@ export default function MenuPage() {
     }
   }, [rows])
 
-  // 1食あたりの平均（確定した料理ぜんぶの合計 ÷ 食事回数）。食事回数＝主菜と麺・丼・ワンプレートの数
-  const stats = useMemo(() => {
-    const all = [...purchased, ...confirmed]
-    const meals = all.filter((r) => r.category != null && MEAL_CATEGORIES.includes(r.category)).length
-    let totalKcal = 0
-    let totalPrice = 0
-    let uncertain = false
-    for (const r of all) {
-      if (r.kcal != null) totalKcal += r.kcal
-      else uncertain = true
-      if (r.price != null) totalPrice += r.price
-      else uncertain = true
-      if (r.unresolved > 0) uncertain = true
-    }
-    return {
-      meals,
-      avgKcal: meals > 0 ? totalKcal / meals : null,
-      avgPrice: meals > 0 ? totalPrice / meals : null,
-      uncertain,
-    }
-  }, [purchased, confirmed])
+  // 分析の対象：確定した料理（購入済も含む）。目印（fp）が変わったら、保存した結果はリセット
+  const dishes: DishInput[] = useMemo(
+    () =>
+      [...purchased, ...confirmed].map((r) => ({
+        id: r.id,
+        dish_name: r.dish_name,
+        category: r.category,
+        planned: plannedOf(r),
+        kcal: r.kcal,
+        price: r.price,
+      })),
+    [purchased, confirmed],
+  )
+  const fp = useMemo(() => fingerprint(dishes), [dishes])
+  useEffect(() => {
+    if (loading) return // 読み込み前（料理0件）で判定すると、保存した結果を消してしまうため
+    setAnalysis(loadSaved(fp))
+  }, [fp, loading])
 
   return (
     <div className="min-h-screen bg-gray-50 pb-6">
       {/* 一番上（スクロールしても固定）：1食あたりの平均 ＋ 買い物リストに追加 */}
       <div className="sticky top-0 z-40 border-b border-gray-200 bg-gray-50 px-2 pb-2 pt-2">
-        <div className="mb-1.5 flex items-center justify-between gap-2 px-1 text-xs text-gray-600">
-          <span className="shrink-0">
-            🍽 食事 <b className="text-gray-900">{stats.meals}</b>回
+        <div className="mb-1.5 flex items-center gap-2 px-1 text-xs text-gray-600">
+          <span className="min-w-0 flex-1 truncate">
+            {analysis ? (
+              <>
+                1食平均 <b className="text-gray-900">{fmtVal(analysis.perMeal.price, '円')}</b>
+                {' ・ '}
+                <b className="text-gray-900">{fmtVal(analysis.perMeal.kcal, 'kcal')}</b>
+                <span className="text-gray-400">（1人・主食込み・{analysis.meals}食）</span>
+                {analysis.items.some((i) => i.status === 'short') && <span className="ml-1 text-red-600">栄養に不足あり</span>}
+              </>
+            ) : dishes.length === 0 ? (
+              <span className="text-gray-400">確定した料理を分析できます</span>
+            ) : (
+              <span className="text-gray-400">確定の料理から、1食の平均と栄養を分析</span>
+            )}
           </span>
-          {stats.meals > 0 ? (
-            <span className="min-w-0 truncate text-right">
-              1食平均{' '}
-              <b className="text-gray-900">{fmtVal(stats.avgPrice, '円')}</b>
-              {' ・ '}
-              <b className="text-gray-900">{fmtVal(stats.avgKcal, 'kcal')}</b>
-              {stats.uncertain && <span className="text-amber-600">※</span>}
-              <span className="text-gray-400">（1人前）</span>
-            </span>
-          ) : (
-            <span className="min-w-0 truncate text-right text-gray-400">
-              1食平均 ―（確定した主菜・麺・丼がありません）
-            </span>
-          )}
+          <button
+            type="button"
+            onClick={() => setShowAnalysis(true)}
+            disabled={dishes.length === 0}
+            className="shrink-0 rounded-full border border-amber-400 bg-white px-3 py-1 text-xs font-bold text-amber-700 active:bg-amber-50 disabled:opacity-40"
+          >
+            📊 分析
+          </button>
         </div>
         <button
           onClick={() => setShowAdd(true)}
@@ -510,6 +520,20 @@ export default function MenuPage() {
               },
             })
           }}
+        />
+      )}
+
+      {/* 分析（画面いっぱい） */}
+      {showAnalysis && (
+        <MenuAnalysisSheet
+          userId={userId}
+          dishes={dishes}
+          saved={analysis}
+          onResult={(res) => {
+            setAnalysis(res)
+            saveResult(res)
+          }}
+          onClose={() => setShowAnalysis(false)}
         />
       )}
 

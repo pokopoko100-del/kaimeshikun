@@ -1,5 +1,6 @@
 // src/lib/household.ts（ファイル全体。これで丸ごと置き換えてください）
-// 今回の変更：献立に追加したときの人数の初期値（households.default_plan_servings）の読み書きを追加
+// 今回の変更：献立に追加したときの人数の初期値は、家族が登録されていれば家族の人数にした
+// 前回の変更：献立に追加したときの人数の初期値（households.default_plan_servings）の読み書きを追加
 // 世帯（家族グループ）まわりのDB操作：世帯ID・買い物リストのID・カテゴリ順の読み書き
 import { supabase } from '../supabaseClient'
 import { normalizeCategoryOrder } from './categoryOrder'
@@ -107,9 +108,16 @@ export async function saveDefaultPlanServings(householdId: string, value: number
 }
 
 // ログイン中のユーザーの「献立に追加したときの人数」の初期値
+//   家族（設定画面の「家族」）が登録されていれば、その人数。いなければ、設定画面の人数（初期値2）
 export async function defaultPlanServingsFor(userId: string): Promise<number> {
   try {
-    return await fetchDefaultPlanServings(await getHouseholdId(userId))
+    const householdId = await getHouseholdId(userId)
+    const { count, error } = await supabase
+      .from('household_people')
+      .select('id', { count: 'exact', head: true })
+      .eq('household_id', householdId)
+    if (!error && count != null && count > 0) return Math.min(MAX_PLAN_SERVINGS, count)
+    return await fetchDefaultPlanServings(householdId)
   } catch (e) {
     console.error(e)
     return DEFAULT_PLAN_SERVINGS
